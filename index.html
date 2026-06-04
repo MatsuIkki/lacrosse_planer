@@ -182,6 +182,7 @@ const EVENT_TYPE_MAP = Object.fromEntries(EVENT_TYPES.map(e => [e.id, e]));
 function ScheduleTab({ roster, sessions, updateSessions, onGoToPlan, focus, updateFocus }) {
   const [viewMode, setViewMode] = useState("calendar"); // "calendar" | "detail"
   const [selectedDate, setSelectedDate] = useState(today());
+  const [weekOffset, setWeekOffset] = useState(0);
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
   const [showEventEditor, setShowEventEditor] = useState(false);
@@ -244,8 +245,17 @@ function ScheduleTab({ roster, sessions, updateSessions, onGoToPlan, focus, upda
   };
 
   const selectDate = (d) => {
-    setSelectedDate(dateStr(d));
+    const ds = dateStr(d);
+    setSelectedDate(ds);
     setViewMode("detail");
+    // weekOffsetを選択日の週に合わせる
+    const todayDate = new Date();
+    const clickedDate = new Date(ds + "T00:00:00");
+    const diffDays = Math.round((clickedDate - todayDate) / (1000 * 60 * 60 * 24));
+    // 月曜始まりの週の月曜日に合わせる
+    const todayDow = todayDate.getDay() === 0 ? 6 : todayDate.getDay() - 1;
+    const clickedDow = clickedDate.getDay() === 0 ? 6 : clickedDate.getDay() - 1;
+    setWeekOffset(diffDays - clickedDow + todayDow);
   };
 
   const currentEventType = session.eventType ? EVENT_TYPE_MAP[session.eventType] : null;
@@ -350,10 +360,25 @@ function ScheduleTab({ roster, sessions, updateSessions, onGoToPlan, focus, upda
       {/* ===== DETAIL VIEW ===== */}
       {viewMode === "detail" && (
         <div>
+          {/* Week navigation */}
+          <div style={styles.weekNav}>
+            <button onClick={() => setWeekOffset(w => w - 7)} style={styles.weekNavBtn}>‹</button>
+            <span style={styles.weekNavLabel}>
+              {(() => {
+                const base = new Date(); base.setDate(base.getDate() + weekOffset);
+                const mon = new Date(base); mon.setDate(base.getDate() - base.getDay() + 1);
+                const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+                return `${mon.getMonth()+1}/${mon.getDate()} 〜 ${sun.getMonth()+1}/${sun.getDate()}`;
+              })()}
+            </span>
+            <button onClick={() => setWeekOffset(w => w + 7)} style={styles.weekNavBtn}>›</button>
+          </div>
+
           {/* Date strip */}
           <div style={styles.dateStrip}>
             {Array.from({ length: 7 }, (_, i) => {
-              const d = new Date(); d.setDate(d.getDate() - 3 + i);
+              const d = new Date();
+              d.setDate(d.getDate() + weekOffset - d.getDay() + 1 + i); // Mon〜Sun
               const ds = d.toISOString().slice(0, 10);
               const et = sessions[ds]?.eventType ? EVENT_TYPE_MAP[sessions[ds].eventType] : null;
               return (
@@ -1423,6 +1448,10 @@ const styles = {
   focusInput: { flex: 1, background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 8, color: "#d8d8d8", padding: "6px 8px", fontSize: 13, outline: "none", resize: "none", lineHeight: 1.5, fontFamily: "inherit" },
   focusRemoveBtn: { width: 22, height: 22, borderRadius: 4, border: "none", background: "#2a1010", color: "#e8533a", cursor: "pointer", fontSize: 10, flexShrink: 0, marginTop: 4 },
   focusAddBtn: { fontSize: 12, fontWeight: 600, background: "transparent", border: "none", cursor: "pointer", padding: "4px 0", marginTop: 2 },
+
+  weekNav: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  weekNavBtn: { width: 36, height: 36, borderRadius: 8, border: "1px solid #2a2a3a", background: "#111116", color: "#888", cursor: "pointer", fontSize: 20 },
+  weekNavLabel: { fontSize: 14, fontWeight: 700, color: "#aaa" },
 
   viewToggleBtn: { padding: "6px 12px", borderRadius: 8, border: "1px solid #2a2a3a", background: "transparent", color: "#555", cursor: "pointer", fontSize: 12, fontWeight: 600 },
   viewToggleBtnActive: { background: "#1a1a22", border: "1px solid #4a9eff55", color: "#e8e8e8" },
