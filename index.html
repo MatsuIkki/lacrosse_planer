@@ -562,32 +562,56 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
 
   const buildCopyText = () => {
     const locStr = session.location === "その他" ? session.locationNote || "その他" : session.location;
-    const lines = [
-      `📅 ${selectedDate.replace(/-/g, "/")} 練習プラン`,
-      locStr ? `📍 ${locStr}` : null,
-      `👥 参加: ${totalPresent}名（${POSITIONS.map(p => `${p}:${presentByPos[p]}`).join(" ")}）`,
-      `⏱ ${session.startTime || "未設定"}〜${endTimeStr || "未設定"}（合計${totalMin}分）`,
-      ``,
-    ].filter(l => l !== null);
+    const DAY_JP = ["日","月","火","水","木","金","土"];
+    const dow = DAY_JP[new Date(selectedDate + "T00:00:00").getDay()];
+    const dateLabel = `${parseInt(selectedDate.slice(5,7))}/${parseInt(selectedDate.slice(8,10))}（${dow}）`;
+
+    const lines = [];
+
+    // ヘッダー
+    const header = [dateLabel, locStr ? `📍${locStr}` : null].filter(Boolean).join("  ");
+    lines.push(header);
+    lines.push("");
+
     plan.forEach((item, i) => {
-      const t = scheduledTimes[i] != null ? fmtTime(scheduledTimes[i]) : `(${i + 1})`;
+      const t = scheduledTimes[i] != null ? fmtTime(scheduledTimes[i]) : "";
+      const prefix = t ? `${t}  ` : "";
+
       if (item.type === "rest") {
-        lines.push(`${t} レスト ${item.duration}分`);
+        lines.push(`${prefix}--- レスト ${item.duration}' ---`);
+        return;
+      }
+
+      const sets = item.sets || 1;
+      const setRest = item.setRest || 0;
+      const mins = itemMin(item);
+
+      // 時間表記: 1セットなら「20'」、複数なら「4'×2」
+      let timeStr;
+      if (sets === 1) {
+        timeStr = `${item.duration}'`;
       } else {
-        const sets = item.sets || 1;
-        const setRest = item.setRest || 0;
-        const mins = itemMin(item);
-        let detail = `${item.duration}分`;
-        if (sets > 1) {
-          detail += ` × ${sets}セット`;
-          if (setRest > 0) detail += `（セット間レスト${setRest}分）`;
-          detail += ` = ${mins}分`;
-        }
-        lines.push(`${t} ${item.name}`);
-        const extra = `${item.points > 0 ? ` 📍${item.points}P` : ""}${item.goals > 0 ? ` 🥅${item.goals}G` : ""}`;
-        lines.push(`　　　${item.category}｜${detail}${extra}`);
+        timeStr = `${item.duration}'×${sets}`;
+        if (setRest > 0) timeStr += `（間${setRest}'）`;
+      }
+
+      // サブ情報
+      const sub = [];
+      if (item.points > 0) sub.push(`${item.points}ポイント`);
+      if (item.goals > 0) sub.push(`🥅${item.goals}`);
+      const subStr = sub.length > 0 ? `  ※${sub.join(" ")}` : "";
+
+      lines.push(`${prefix}${item.name}  ${timeStr}${subStr}`);
+
+      // 概要（あれば字下げ）
+      if (item.description) {
+        lines.push(`　（${item.description}）`);
       }
     });
+
+    lines.push("");
+    if (endTimeStr) lines.push(`合計 ${totalMin}'  終了 ${endTimeStr}`);
+
     return lines.join("\n");
   };
 
@@ -690,11 +714,13 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
               await saveSession({ plan: p });
             };
             const updateDuration = async (val) => {
+              if (val === "" || val === "0") return; // 空欄・0は保存しない
               const v = Math.max(1, parseInt(val) || 1);
               const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, duration: v } : d);
               await saveSession({ plan: p });
             };
             const updateSetsInline = async (val) => {
+              if (val === "" || val === "0") return;
               const v = Math.max(1, parseInt(val) || 1);
               const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, sets: v } : d);
               await saveSession({ plan: p });
@@ -721,7 +747,7 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
                     {isRest ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <span style={{ color: "#888", fontSize: 14 }}>レスト</span>
-                        <input type="number" min={1} value={item.duration}
+                        <input type="number" min={1} value={item.duration || ""}
                           onChange={e => updateDuration(e.target.value)}
                           style={styles.durationInput} />
                         <span style={{ color: "#666", fontSize: 12 }}>分</span>
@@ -731,18 +757,18 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
                         <div style={styles.planItemName}>{item.name}</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
                           <span style={{ ...styles.catBadge, color: CAT_COLOR_PLAN[item.category] }}>{item.category}</span>
-                          <input type="number" min={1} value={item.duration}
+                          <input type="number" min={1} value={item.duration || ""}
                             onChange={e => updateDuration(e.target.value)}
                             style={styles.durationInput} />
                           <span style={{ color: "#666", fontSize: 12 }}>分 ×</span>
-                          <input type="number" min={1} value={item.sets || 1}
+                          <input type="number" min={1} value={item.sets || ""}
                             onChange={e => updateSetsInline(e.target.value)}
                             style={styles.durationInput} />
                           <span style={{ color: "#666", fontSize: 12 }}>セット</span>
                           {(item.sets || 1) > 1 && (
                             <>
                               <span style={{ color: "#555", fontSize: 12 }}>レスト</span>
-                              <input type="number" min={0} value={item.setRest || 0}
+                              <input type="number" min={0} value={item.setRest || ""}
                                 onChange={e => {
                                   const v = Math.max(0, parseInt(e.target.value) || 0);
                                   saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, setRest: v } : d) });
@@ -755,12 +781,12 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
                           <span style={{ color: "#555", fontSize: 12 }}>📍</span>
-                          <input type="number" min={0} value={item.points || 0}
+                          <input type="number" min={0} value={item.points || ""}
                             onChange={e => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, points: +e.target.value || 0 } : d) })}
                             style={{ ...styles.durationInput, width: 40 }} />
                           <span style={{ color: "#555", fontSize: 12 }}>P</span>
                           <span style={{ color: "#555", fontSize: 12, marginLeft: 6 }}>🥅</span>
-                          <input type="number" min={0} value={item.goals || 0}
+                          <input type="number" min={0} value={item.goals || ""}
                             onChange={e => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, goals: +e.target.value || 0 } : d) })}
                             style={{ ...styles.durationInput, width: 40 }} />
                           <span style={{ color: "#555", fontSize: 12 }}>G</span>
@@ -984,7 +1010,7 @@ function DrillsTab({ drills, updateDrills }) {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div>
                 <Label>所要時間（分）</Label>
-                <input type="number" value={form.duration} onChange={e => setForm({ ...form, duration: +e.target.value })}
+                <input type="number" value={form.duration || ""} onChange={e => setForm({ ...form, duration: parseInt(e.target.value) || 0 })}
                   style={styles.input} min={5} max={120} step={5} />
               </div>
               <div>
