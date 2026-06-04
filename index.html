@@ -1,0 +1,1498 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lacrosse Manager</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0c0c0e; color: #e8e8e8; font-family: "Noto Sans JP", sans-serif; }
+    input, select, textarea, button { font-family: inherit; }
+    input[type=number]::-webkit-inner-spin-button { opacity: 1; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #111; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const XLSX = window.XLSX;
+
+
+// ============================================================
+// STORAGE HELPERS
+// ============================================================
+const KEYS = {
+  roster: "lacrosse:roster",
+  drills: "lacrosse:drills",
+  sessions: "lacrosse:sessions",
+  focus: "lacrosse:focus",
+};
+
+async function load(key) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : null;
+  } catch { return null; }
+}
+
+async function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const POSITIONS = ["AT", "MF", "DF", "GK"];
+const GRADES = ["1", "2", "3", "4", "OB"];
+const CAMPUSES = ["野田", "神楽坂", "金町"];
+const POS_COLOR = { AT: "#e8533a", MF: "#f5a623", DF: "#4a9eff", GK: "#7ed321" };
+const POS_BG = { AT: "#3a1a14", MF: "#3a2a0a", DF: "#0a1f3a", GK: "#0f2a07" };
+
+const DEFAULT_DRILLS = [
+  { id: "d1", name: "ウォームアップラン", duration: 10, category: "フィジカル", description: "軽いジョグでウォームアップ", url: "", requirements: {} },
+  { id: "d2", name: "キャッチ＆パス基礎", duration: 15, category: "OF", description: "2人1組でキャッチとパスの基礎練習", url: "", requirements: {} },
+  { id: "d3", name: "GKシュート練習", duration: 20, category: "OF", description: "様々な角度からのシュート練習", url: "", requirements: { GK: 1 } },
+  { id: "d4", name: "ATドリル", duration: 20, category: "OF", description: "ATによるクリースアタック練習", url: "", requirements: { AT: 2 } },
+  { id: "d5", name: "DF連携練習", duration: 25, category: "DF", description: "DFのローテーションと連携確認", url: "", requirements: { DF: 3, GK: 1 } },
+  { id: "d6", name: "6 vs 6 スクリメージ", duration: 30, category: "OF", description: "全員参加のスクリメージ形式", url: "", requirements: { AT: 3, MF: 3, DF: 3, GK: 1 } },
+  { id: "d7", name: "クリア練習", duration: 20, category: "クリア", description: "GKからのクリアパターン練習", url: "", requirements: { MF: 2, DF: 2, GK: 1 } },
+  { id: "d8", name: "クールダウン＆ストレッチ", duration: 10, category: "フィジカル", description: "練習後のクールダウンとストレッチ", url: "", requirements: {} },
+];
+
+const DEFAULT_ROSTER = [
+  { id: "p1", name: "山田 太郎", position: "AT", role: "player", grade: "2", campus: "野田" },
+  { id: "p2", name: "鈴木 花子", position: "MF", role: "player", grade: "3", campus: "神楽坂" },
+  { id: "p3", name: "田中 一朗", position: "DF", role: "player", grade: "1", campus: "野田" },
+  { id: "p4", name: "佐藤 美咲", position: "GK", role: "player", grade: "4", campus: "金町" },
+  { id: "p5", name: "高橋 健", position: "AT", role: "player", grade: "2", campus: "野田" },
+  { id: "p6", name: "伊藤 翔", position: "MF", role: "player", grade: "1", campus: "神楽坂" },
+  { id: "p7", name: "渡辺 純", position: "DF", role: "player", grade: "OB", campus: "野田" },
+  { id: "p8", name: "中村 コーチ", position: "AT", role: "coach", grade: "", campus: "野田" },
+];
+
+function genId() { return Math.random().toString(36).slice(2, 9); }
+function today() { return new Date().toISOString().slice(0, 10); }
+
+// ============================================================
+// MAIN APP
+// ============================================================
+function App() {
+  const [tab, setTab] = useState("schedule");
+  const [roster, setRoster] = useState(null);
+  const [drills, setDrills] = useState(null);
+  const [sessions, setSessions] = useState(null);
+  const [focus, setFocus] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      let r = await load(KEYS.roster) || DEFAULT_ROSTER;
+      const d = await load(KEYS.drills) || DEFAULT_DRILLS;
+      const s = await load(KEYS.sessions) || {};
+      // migrate: remove old 'number' field, add grade/campus defaults
+      r = r.map(m => {
+        const { number, ...rest } = m;
+        return { grade: "", campus: "", ...rest };
+      });
+      const r2 = await load(KEYS.focus) || {};
+      setRoster(r); setDrills(d); setSessions(s); setFocus(r2);
+      setLoading(false);
+    })();
+  }, []);
+
+  const [planDate, setPlanDate] = useState(null);
+
+  const goToPlan = (date) => {
+    setPlanDate(date);
+    setTab("plan");
+  };
+  const updateRoster = async (r) => { setRoster(r); await save(KEYS.roster, r); };
+  const updateDrills = async (d) => { setDrills(d); await save(KEYS.drills, d); };
+  const updateSessions = async (s) => { setSessions(s); await save(KEYS.sessions, s); };
+
+  const updateFocus = async (f) => { setFocus(f); await save(KEYS.focus, f); };
+
+  if (loading) return (
+    <div style={styles.loading}>
+      <div style={styles.loadingDot} />
+      <span style={{ color: "#888", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>読み込み中…</span>
+    </div>
+  );
+
+  const TABS = [
+    { id: "schedule", label: "スケジュール", icon: "📅" },
+    { id: "plan", label: "練習プラン", icon: "🏃" },
+    { id: "drills", label: "メニュー管理", icon: "📋" },
+    { id: "roster", label: "メンバー", icon: "👥" },
+    { id: "export", label: "出力", icon: "📤" },
+  ];
+
+  return (
+    <div style={styles.app}>
+      {/* Header */}
+      <header style={styles.header}>
+        <div style={styles.headerInner}>
+          <div style={styles.logo}>
+            <span style={styles.logoIcon}>✦</span>
+            <span style={styles.logoText}>LACROSSE<br /><span style={styles.logoSub}>MANAGER</span></span>
+          </div>
+          <nav style={styles.nav}>
+            {TABS.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                style={{ ...styles.navBtn, ...(tab === t.id ? styles.navBtnActive : {}) }}>
+                <span style={{ fontSize: 14 }}>{t.icon}</span>
+                <span style={{ fontSize: 11, marginTop: 2 }}>{t.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      {/* Content */}
+      <main style={styles.main}>
+        {tab === "schedule" && focus !== null && <ScheduleTab roster={roster} sessions={sessions} updateSessions={updateSessions} onGoToPlan={goToPlan} focus={focus} updateFocus={updateFocus} />}
+        {tab === "plan" && <PlanTab roster={roster} drills={drills} sessions={sessions} updateSessions={updateSessions} initialDate={planDate} />}
+        {tab === "drills" && <DrillsTab drills={drills} updateDrills={updateDrills} />}
+        {tab === "roster" && <RosterTab roster={roster} updateRoster={updateRoster} />}
+        {tab === "export" && <ExportTab roster={roster} drills={drills} sessions={sessions} />}
+      </main>
+    </div>
+  );
+}
+
+// ============================================================
+// SCHEDULE TAB
+// ============================================================
+const EVENT_TYPES = [
+  { id: "practice",   label: "練習",     color: "#4a9eff", bg: "#0a1f3a" },
+  { id: "scrimmage",  label: "練習試合", color: "#f5a623", bg: "#3a2a0a" },
+  { id: "game",       label: "公式戦",   color: "#e8533a", bg: "#3a1a14" },
+  { id: "camp",       label: "合宿",     color: "#c47eff", bg: "#1e0a3a" },
+  { id: "joint",      label: "合同練習", color: "#7ed321", bg: "#0f2a07" },
+];
+const EVENT_TYPE_MAP = Object.fromEntries(EVENT_TYPES.map(e => [e.id, e]));
+
+function ScheduleTab({ roster, sessions, updateSessions, onGoToPlan, focus, updateFocus }) {
+  const [viewMode, setViewMode] = useState("calendar"); // "calendar" | "detail"
+  const [selectedDate, setSelectedDate] = useState(today());
+  const [calYear, setCalYear] = useState(() => new Date().getFullYear());
+  const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
+  const [showEventEditor, setShowEventEditor] = useState(false);
+
+  const session = sessions[selectedDate] || { attendance: {}, eventType: "", eventNote: "" };
+  const players = roster.filter(m => m.role === "player");
+  const coaches = roster.filter(m => m.role === "coach");
+
+  const saveSession = async (updates) => {
+    await updateSessions({ ...sessions, [selectedDate]: { ...session, ...updates } });
+  };
+
+  const toggleAttend = async (id, status) => {
+    const prev = session.attendance[id];
+    const next = prev === status ? undefined : status;
+    await saveSession({ attendance: { ...session.attendance, [id]: next } });
+  };
+
+  const presentCount = (pos) => players.filter(p => p.position === pos && session.attendance[p.id] === "present").length;
+  const totalPresent = players.filter(p => session.attendance[p.id] === "present").length;
+
+  // ---- Calendar helpers ----
+  const monthKey = `${calYear}-${String(calMonth + 1).padStart(2, "0")}`;
+  const monthFocus = (focus || {})[monthKey] || { of: [""], df: [""] };
+
+  const updateMonthFocus = async (side, idx, val) => {
+    const items = [...(monthFocus[side] || [""])];
+    items[idx] = val;
+    await updateFocus({ ...(focus || {}), [monthKey]: { ...monthFocus, [side]: items } });
+  };
+  const addFocusItem = async (side) => {
+    const items = [...(monthFocus[side] || [""]), ""];
+    await updateFocus({ ...(focus || {}), [monthKey]: { ...monthFocus, [side]: items } });
+  };
+  const removeFocusItem = async (side, idx) => {
+    const items = (monthFocus[side] || [""]).filter((_, i) => i !== idx);
+    await updateFocus({ ...(focus || {}), [monthKey]: { ...monthFocus, [side]: items.length ? items : [""] } });
+  };
+  const calDays = (() => {
+    const first = new Date(calYear, calMonth, 1);
+    const last = new Date(calYear, calMonth + 1, 0);
+    const days = [];
+    // pad start
+    for (let i = 0; i < first.getDay(); i++) days.push(null);
+    for (let d = 1; d <= last.getDate(); d++) days.push(d);
+    return days;
+  })();
+
+  const dateStr = (d) => `${calYear}-${String(calMonth + 1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  const DAY_LABELS = ["日","月","火","水","木","金","土"];
+  const MONTH_NAMES = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+
+  const eventTypeForDate = (d) => {
+    const s = sessions[dateStr(d)];
+    return s?.eventType ? EVENT_TYPE_MAP[s.eventType] : null;
+  };
+  const hasPlan = (d) => {
+    const s = sessions[dateStr(d)];
+    return s?.plan?.length > 0;
+  };
+
+  const selectDate = (d) => {
+    setSelectedDate(dateStr(d));
+    setViewMode("detail");
+  };
+
+  const currentEventType = session.eventType ? EVENT_TYPE_MAP[session.eventType] : null;
+
+  return (
+    <div style={styles.tabContent}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ ...styles.tabTitle, marginBottom: 0 }}>スケジュール</h2>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => setViewMode("calendar")}
+            style={{ ...styles.viewToggleBtn, ...(viewMode === "calendar" ? styles.viewToggleBtnActive : {}) }}>📅 月</button>
+          <button onClick={() => setViewMode("detail")}
+            style={{ ...styles.viewToggleBtn, ...(viewMode === "detail" ? styles.viewToggleBtnActive : {}) }}>📋 日</button>
+        </div>
+      </div>
+
+      {/* ===== CALENDAR VIEW ===== */}
+      {viewMode === "calendar" && (
+        <div>
+          {/* Month nav */}
+          <div style={styles.monthNav}>
+            <button onClick={() => { if (calMonth === 0) { setCalMonth(11); setCalYear(y => y-1); } else setCalMonth(m => m-1); }} style={styles.monthNavBtn}>‹</button>
+            <span style={styles.monthLabel}>{calYear}年 {MONTH_NAMES[calMonth]}</span>
+            <button onClick={() => { if (calMonth === 11) { setCalMonth(0); setCalYear(y => y+1); } else setCalMonth(m => m+1); }} style={styles.monthNavBtn}>›</button>
+          </div>
+
+          {/* Day labels */}
+          <div style={styles.calGrid}>
+            {DAY_LABELS.map((l, i) => (
+              <div key={l} style={{ ...styles.calDayLabel, color: i === 0 ? "#e8533a" : i === 6 ? "#4a9eff" : "#555" }}>{l}</div>
+            ))}
+            {calDays.map((d, i) => {
+              if (!d) return <div key={`empty-${i}`} />;
+              const ds = dateStr(d);
+              const et = eventTypeForDate(d);
+              const isToday = ds === today();
+              const isSelected = ds === selectedDate;
+              const hp = hasPlan(d);
+              const dow = (i) => { const first = new Date(calYear, calMonth, 1).getDay(); return (first + d - 1) % 7; };
+              const dayOfWeek = new Date(ds + "T00:00:00").getDay();
+              return (
+                <button key={d} onClick={() => selectDate(d)} style={{
+                  ...styles.calDay,
+                  ...(isSelected ? styles.calDaySelected : {}),
+                  ...(isToday ? styles.calDayToday : {}),
+                  background: et ? et.bg : "#0c0c0e",
+                  borderColor: et ? et.color + "55" : isToday ? "#e8533a55" : "#1e1e24",
+                }}>
+                  <span style={{ fontSize: 14, fontWeight: isToday ? 700 : 400, color: dayOfWeek === 0 ? "#e8533a88" : dayOfWeek === 6 ? "#4a9eff88" : "#ccc" }}>{d}</span>
+                  {et && <span style={{ fontSize: 9, color: et.color, fontWeight: 700, lineHeight: 1.2 }}>{et.label}</span>}
+                  {hp && <span style={styles.calPlanDot} />}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Legend */}
+          <div style={styles.calLegend}>
+            {EVENT_TYPES.map(et => (
+              <div key={et.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: et.color, flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: "#666" }}>{et.label}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#4a9eff", flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "#666" }}>プランあり</span>
+            </div>
+          </div>
+
+          {/* 今月の注力ポイント */}
+          <div style={styles.focusSection}>
+            <div style={styles.focusTitle}>📌 今月の注力ポイント</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {[{ side: "of", label: "オフェンス", color: "#e8533a" }, { side: "df", label: "ディフェンス", color: "#4a9eff" }].map(({ side, label, color }) => (
+                <div key={side}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color, marginBottom: 8, letterSpacing: "0.04em" }}>{label}</div>
+                  {(monthFocus[side] || [""]).map((item, idx) => (
+                    <div key={idx} style={styles.focusRow}>
+                      <span style={{ color, fontSize: 11, flexShrink: 0, marginTop: 6 }}>•</span>
+                      <textarea
+                        value={item}
+                        onChange={e => updateMonthFocus(side, idx, e.target.value)}
+                        style={styles.focusInput}
+                        placeholder="入力..."
+                        rows={2}
+                      />
+                      {(monthFocus[side] || [""]).length > 1 && (
+                        <button onClick={() => removeFocusItem(side, idx)} style={styles.focusRemoveBtn}>✕</button>
+                      )}
+                    </div>
+                  ))}
+                  <button onClick={() => addFocusItem(side)} style={{ ...styles.focusAddBtn, color }}>＋ 追加</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== DETAIL VIEW ===== */}
+      {viewMode === "detail" && (
+        <div>
+          {/* Date strip */}
+          <div style={styles.dateStrip}>
+            {Array.from({ length: 7 }, (_, i) => {
+              const d = new Date(); d.setDate(d.getDate() - 3 + i);
+              const ds = d.toISOString().slice(0, 10);
+              const et = sessions[ds]?.eventType ? EVENT_TYPE_MAP[sessions[ds].eventType] : null;
+              return (
+                <button key={ds} onClick={() => setSelectedDate(ds)}
+                  style={{ ...styles.dateBtn, ...(ds === selectedDate ? styles.dateBtnActive : {}), ...(ds === today() ? styles.dateBtnToday : {}) }}>
+                  <span style={{ fontSize: 10, opacity: 0.6 }}>{DAY_LABELS[d.getDay()]}</span>
+                  <span style={{ fontSize: 16, fontWeight: 700 }}>{ds.slice(8)}</span>
+                  {et && <span style={{ fontSize: 8, color: et.color, fontWeight: 700 }}>{et.label}</span>}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Event type badge + edit */}
+          <div style={styles.eventTypeBar}>
+            {currentEventType
+              ? <span style={{ ...styles.eventTypeBadge, color: currentEventType.color, background: currentEventType.bg, border: `1px solid ${currentEventType.color}44` }}>{currentEventType.label}</span>
+              : <span style={{ color: "#444", fontSize: 13 }}>予定タイプ未設定</span>
+            }
+            <button onClick={() => setShowEventEditor(true)} style={styles.editBtn}>予定を設定</button>
+          </div>
+
+          {session.eventNote && (
+            <div style={styles.eventNote}>{session.eventNote}</div>
+          )}
+
+          {/* Link to plan */}
+          <button onClick={() => onGoToPlan(selectedDate)} style={styles.toPlanBtn}>
+            🏃 この日の練習プランへ →
+          </button>
+
+          {/* Position summary */}
+          <div style={styles.posSummary}>
+            {POSITIONS.map(pos => (
+              <div key={pos} style={{ ...styles.posCard, background: POS_BG[pos], border: `1px solid ${POS_COLOR[pos]}33` }}>
+                <span style={{ ...styles.posBadge, color: POS_COLOR[pos] }}>{pos}</span>
+                <span style={styles.posCount}>{presentCount(pos)}<span style={{ fontSize: 11, opacity: 0.5 }}>/{players.filter(p => p.position === pos).length}</span></span>
+              </div>
+            ))}
+          </div>
+
+          {/* Coaches */}
+          {coaches.length > 0 && (
+            <Section title={`コーチ (${coaches.filter(c => session.attendance[c.id] === "present").length}/${coaches.length})`}>
+              {coaches.map(c => <AttendRow key={c.id} member={c} status={session.attendance[c.id]} onToggle={toggleAttend} />)}
+            </Section>
+          )}
+
+          {/* Players by position */}
+          {POSITIONS.map(pos => {
+            const posPlayers = players.filter(p => p.position === pos);
+            if (!posPlayers.length) return null;
+            return (
+              <Section key={pos} title={`${pos} (${presentCount(pos)}/${posPlayers.length})`} color={POS_COLOR[pos]}>
+                {posPlayers.map(p => <AttendRow key={p.id} member={p} status={session.attendance[p.id]} onToggle={toggleAttend} />)}
+              </Section>
+            );
+          })}
+
+          <div style={styles.totalBar}>
+            <span style={{ color: "#888", fontSize: 13 }}>本日の参加者合計</span>
+            <span style={{ color: "#fff", fontSize: 22, fontWeight: 700 }}>{totalPresent}<span style={{ fontSize: 13, color: "#888" }}>名</span></span>
+          </div>
+        </div>
+      )}
+
+      {/* Event editor modal */}
+      {showEventEditor && (
+        <div style={styles.modalBg} onClick={() => setShowEventEditor(false)}>
+          <div style={{ ...styles.modal, paddingBottom: 32 }} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>予定を設定</span>
+              <button onClick={() => setShowEventEditor(false)} style={styles.modalClose}>✕</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              {EVENT_TYPES.map(et => (
+                <button key={et.id} onClick={() => saveSession({ eventType: session.eventType === et.id ? "" : et.id })}
+                  style={{ ...styles.eventTypeOption, background: session.eventType === et.id ? et.bg : "transparent", border: `1px solid ${session.eventType === et.id ? et.color : "#2a2a3a"}`, color: session.eventType === et.id ? et.color : "#888" }}>
+                  {et.label}
+                </button>
+              ))}
+            </div>
+            <Label>メモ（相手チーム名・会場など）</Label>
+            <textarea value={session.eventNote || ""} onChange={e => saveSession({ eventNote: e.target.value })}
+              style={{ ...styles.input, height: 72, resize: "vertical" }} placeholder="例: vs 〇〇大学、△△グラウンド" />
+            <button onClick={() => setShowEventEditor(false)} style={{ ...styles.addBtn, width: "100%", padding: "12px 0" }}>完了</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttendRow({ member, status, onToggle }) {
+  return (
+    <div style={styles.attendRow}>
+      <div style={styles.memberInfo}>
+        <span style={{ ...styles.posBadgeSmall, color: POS_COLOR[member.position], borderColor: POS_COLOR[member.position] + "55" }}>{member.position}</span>
+        <span style={styles.memberName}>{member.name}</span>
+      </div>
+      <div style={styles.attendBtns}>
+        <button onClick={() => onToggle(member.id, "present")}
+          style={{ ...styles.attendBtn, ...(status === "present" ? styles.attendPresent : {}) }}>○</button>
+        <button onClick={() => onToggle(member.id, "absent")}
+          style={{ ...styles.attendBtn, ...(status === "absent" ? styles.attendAbsent : {}) }}>✕</button>
+        <button onClick={() => onToggle(member.id, "late")}
+          style={{ ...styles.attendBtn, ...(status === "late" ? styles.attendLate : {}) }}>△</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// PLAN TAB
+// ============================================================
+const LOCATIONS = ["第五", "第三", "ラグビー場", "金町", "その他"];
+const CATEGORIES_PLAN = ["OF", "DF", "クリア", "ライド", "GB", "フィジカル"];
+const CAT_COLOR_PLAN = { OF: "#e8533a", DF: "#4a9eff", クリア: "#f5a623", ライド: "#c47eff", GB: "#7ed321", フィジカル: "#ff8c42" };
+
+function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
+  const [selectedDate, setSelectedDate] = useState(initialDate || today());
+  const [showDrillPicker, setShowDrillPicker] = useState(false);
+  const [showRestPicker, setShowRestPicker] = useState(false);
+  const [restMin, setRestMin] = useState(5);
+  const [pendingDrill, setPendingDrill] = useState(null);
+  const [pendingSets, setPendingSets] = useState(1);
+  const [pendingSetRest, setPendingSetRest] = useState(0);
+  const [copied, setCopied] = useState(false);
+
+  const session = sessions[selectedDate] || { attendance: {}, plan: [], startTime: "", location: "", locationNote: "" };
+  const players = roster.filter(m => m.role === "player");
+
+  const presentByPos = {};
+  POSITIONS.forEach(pos => {
+    presentByPos[pos] = players.filter(p => p.position === pos && session.attendance[p.id] === "present").length;
+  });
+  const totalPresent = players.filter(p => session.attendance[p.id] === "present").length;
+  const plan = session.plan || [];
+
+  const canDo = (drill) =>
+    Object.entries(drill.requirements || {}).every(([pos, needed]) => (presentByPos[pos] || 0) >= needed);
+
+  const itemMin = (item) => {
+    if (item.type === "rest") return item.duration;
+    const sets = item.sets || 1;
+    const setRest = item.setRest || 0;
+    return item.duration * sets + setRest * Math.max(0, sets - 1);
+  };
+  const totalMin = plan.reduce((s, d) => s + itemMin(d), 0);
+
+  const fmtTime = (mins) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+
+  const scheduledTimes = (() => {
+    if (!session.startTime) return [];
+    const [h, m] = session.startTime.split(":").map(Number);
+    let cursor = h * 60 + m;
+    return plan.map(item => { const s = cursor; cursor += itemMin(item); return s; });
+  })();
+
+  const endTimeStr = (() => {
+    if (!session.startTime || plan.length === 0) return null;
+    const [h, m] = session.startTime.split(":").map(Number);
+    return fmtTime(h * 60 + m + totalMin);
+  })();
+
+  const saveSession = async (updates) => {
+    await updateSessions({ ...sessions, [selectedDate]: { ...session, ...updates } });
+  };
+  const removePlanItem = async (instanceId) => saveSession({ plan: plan.filter(d => d.instanceId !== instanceId) });
+
+  const confirmAddDrill = async () => {
+    if (!pendingDrill) return;
+    await saveSession({ plan: [...plan, { ...pendingDrill, instanceId: genId(), sets: pendingSets, setRest: pendingSetRest, type: "drill" }] });
+    setPendingDrill(null); setPendingSets(1); setPendingSetRest(0); setShowDrillPicker(false);
+  };
+
+  const addRest = async () => {
+    await saveSession({ plan: [...plan, { instanceId: genId(), type: "rest", name: "レスト", duration: restMin }] });
+    setShowRestPicker(false); setRestMin(5);
+  };
+
+  const buildCopyText = () => {
+    const locStr = session.location === "その他" ? session.locationNote || "その他" : session.location;
+    const lines = [
+      `📅 ${selectedDate.replace(/-/g, "/")} 練習プラン`,
+      locStr ? `📍 ${locStr}` : null,
+      `👥 参加: ${totalPresent}名（${POSITIONS.map(p => `${p}:${presentByPos[p]}`).join(" ")}）`,
+      `⏱ ${session.startTime || "未設定"}〜${endTimeStr || "未設定"}（合計${totalMin}分）`,
+      ``,
+    ].filter(l => l !== null);
+    plan.forEach((item, i) => {
+      const t = scheduledTimes[i] != null ? fmtTime(scheduledTimes[i]) : `(${i + 1})`;
+      if (item.type === "rest") {
+        lines.push(`${t} レスト ${item.duration}分`);
+      } else {
+        const sets = item.sets || 1;
+        const setRest = item.setRest || 0;
+        const mins = itemMin(item);
+        let detail = `${item.duration}分`;
+        if (sets > 1) {
+          detail += ` × ${sets}セット`;
+          if (setRest > 0) detail += `（セット間レスト${setRest}分）`;
+          detail += ` = ${mins}分`;
+        }
+        lines.push(`${t} ${item.name}`);
+        const extra = `${item.points > 0 ? ` 📍${item.points}P` : ""}${item.goals > 0 ? ` 🥅${item.goals}G` : ""}`;
+        lines.push(`　　　${item.category}｜${detail}${extra}`);
+      }
+    });
+    return lines.join("\n");
+  };
+
+  const handleCopy = async () => {
+    if (plan.length === 0) return;
+    try { await navigator.clipboard.writeText(buildCopyText()); setCopied(true); setTimeout(() => setCopied(false), 2500); } catch {}
+  };
+
+  const weekDates = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - 3 + i); return d.toISOString().slice(0, 10);
+  });
+  const dayLabel = (d) => ["日","月","火","水","木","金","土"][new Date(d + "T00:00:00").getDay()];
+
+  return (
+    <div style={styles.tabContent}>
+      <h2 style={styles.tabTitle}>練習プラン作成</h2>
+
+      <div style={styles.dateStrip}>
+        {weekDates.map(d => (
+          <button key={d} onClick={() => setSelectedDate(d)}
+            style={{ ...styles.dateBtn, ...(d === selectedDate ? styles.dateBtnActive : {}), ...(d === today() ? styles.dateBtnToday : {}) }}>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{dayLabel(d)}</span>
+            <span style={{ fontSize: 16, fontWeight: 700 }}>{d.slice(8)}</span>
+            {(sessions[d]?.plan?.length > 0) && <span style={styles.dateDot} />}
+          </button>
+        ))}
+      </div>
+
+      <div style={styles.posSummary}>
+        {POSITIONS.map(pos => (
+          <div key={pos} style={{ ...styles.posCard, background: POS_BG[pos], border: `1px solid ${POS_COLOR[pos]}33` }}>
+            <span style={{ ...styles.posBadge, color: POS_COLOR[pos] }}>{pos}</span>
+            <span style={styles.posCount}>{presentByPos[pos]}</span>
+          </div>
+        ))}
+      </div>
+
+      {totalPresent === 0 && (
+        <div style={styles.emptyNote}>⚠️ この日の出欠が未入力です。スケジュールタブで入力してください。</div>
+      )}
+
+      {/* Start time bar */}
+      <div style={styles.timeBar}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ color: "#666", fontSize: 13 }}>開始</span>
+          <input type="time" value={session.startTime || ""}
+            onChange={e => saveSession({ startTime: e.target.value })} style={styles.timeInput} />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {plan.length > 0 && <span style={{ color: "#888", fontSize: 13 }}>合計 <span style={{ color: "#fff", fontWeight: 700 }}>{totalMin}分</span></span>}
+          {endTimeStr && <span style={{ color: "#4a9eff", fontSize: 13 }}>終了 <span style={{ fontWeight: 700 }}>{endTimeStr}</span></span>}
+        </div>
+      </div>
+
+      {/* Location */}
+      <div style={styles.locationBar}>
+        <span style={{ color: "#666", fontSize: 13, flexShrink: 0 }}>📍 場所</span>
+        <div style={styles.locationBtns}>
+          {LOCATIONS.map(loc => (
+            <button key={loc} onClick={() => saveSession({ location: session.location === loc ? "" : loc })}
+              style={{ ...styles.locationBtn, ...(session.location === loc ? styles.locationBtnActive : {}) }}>
+              {loc}
+            </button>
+          ))}
+        </div>
+      </div>
+      {session.location === "その他" && (
+        <input value={session.locationNote || ""} onChange={e => saveSession({ locationNote: e.target.value })}
+          style={{ ...styles.input, marginBottom: 12 }} placeholder="場所を入力..." />
+      )}
+
+      {/* Plan header */}
+      <div style={styles.planHeader}>
+        <span style={styles.planLabel}>本日のプラン</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setShowRestPicker(true)} style={styles.restBtn}>＋ レスト</button>
+          <button onClick={() => setShowDrillPicker(true)} style={styles.addBtn}>＋ メニュー</button>
+        </div>
+      </div>
+
+      {plan.length === 0 ? (
+        <div style={styles.emptyPlan}>メニューを追加して練習プランを作りましょう</div>
+      ) : (
+        <div style={styles.planList}>
+          {plan.map((item, i) => {
+            const isRest = item.type === "rest";
+            const mins = itemMin(item);
+            const startT = scheduledTimes[i] != null ? fmtTime(scheduledTimes[i]) : null;
+
+            const moveUp = async () => {
+              if (i === 0) return;
+              const p = [...plan];
+              [p[i - 1], p[i]] = [p[i], p[i - 1]];
+              await saveSession({ plan: p });
+            };
+            const moveDown = async () => {
+              if (i === plan.length - 1) return;
+              const p = [...plan];
+              [p[i], p[i + 1]] = [p[i + 1], p[i]];
+              await saveSession({ plan: p });
+            };
+            const updateDuration = async (val) => {
+              const v = Math.max(1, parseInt(val) || 1);
+              const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, duration: v } : d);
+              await saveSession({ plan: p });
+            };
+            const updateSetsInline = async (val) => {
+              const v = Math.max(1, parseInt(val) || 1);
+              const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, sets: v } : d);
+              await saveSession({ plan: p });
+            };
+
+            return (
+              <div key={item.instanceId} style={{ ...styles.planItem, ...(isRest ? styles.planItemRest : {}) }}>
+                {/* up/down buttons */}
+                <div style={styles.orderBtns}>
+                  <button onClick={moveUp} disabled={i === 0}
+                    style={{ ...styles.orderBtn, opacity: i === 0 ? 0.2 : 1 }}>▲</button>
+                  <button onClick={moveDown} disabled={i === plan.length - 1}
+                    style={{ ...styles.orderBtn, opacity: i === plan.length - 1 ? 0.2 : 1 }}>▼</button>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                  {/* time */}
+                  <div style={styles.planTimeCol}>
+                    {startT ? <span style={styles.planTimeLabel}>{startT}</span> : <span style={styles.planNum}>{i + 1}</span>}
+                  </div>
+
+                  {/* content */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {isRest ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ color: "#888", fontSize: 14 }}>レスト</span>
+                        <input type="number" min={1} value={item.duration}
+                          onChange={e => updateDuration(e.target.value)}
+                          style={styles.durationInput} />
+                        <span style={{ color: "#666", fontSize: 12 }}>分</span>
+                      </div>
+                    ) : (
+                      <>
+                        <div style={styles.planItemName}>{item.name}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
+                          <span style={{ ...styles.catBadge, color: CAT_COLOR_PLAN[item.category] }}>{item.category}</span>
+                          <input type="number" min={1} value={item.duration}
+                            onChange={e => updateDuration(e.target.value)}
+                            style={styles.durationInput} />
+                          <span style={{ color: "#666", fontSize: 12 }}>分 ×</span>
+                          <input type="number" min={1} value={item.sets || 1}
+                            onChange={e => updateSetsInline(e.target.value)}
+                            style={styles.durationInput} />
+                          <span style={{ color: "#666", fontSize: 12 }}>セット</span>
+                          {(item.sets || 1) > 1 && (
+                            <>
+                              <span style={{ color: "#555", fontSize: 12 }}>レスト</span>
+                              <input type="number" min={0} value={item.setRest || 0}
+                                onChange={e => {
+                                  const v = Math.max(0, parseInt(e.target.value) || 0);
+                                  saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, setRest: v } : d) });
+                                }}
+                                style={styles.durationInput} />
+                              <span style={{ color: "#555", fontSize: 12 }}>分/間</span>
+                            </>
+                          )}
+                          <span style={{ color: "#4a9eff", fontSize: 12, fontWeight: 600 }}>= {mins}分</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                          <span style={{ color: "#555", fontSize: 12 }}>📍</span>
+                          <input type="number" min={0} value={item.points || 0}
+                            onChange={e => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, points: +e.target.value || 0 } : d) })}
+                            style={{ ...styles.durationInput, width: 40 }} />
+                          <span style={{ color: "#555", fontSize: 12 }}>P</span>
+                          <span style={{ color: "#555", fontSize: 12, marginLeft: 6 }}>🥅</span>
+                          <input type="number" min={0} value={item.goals || 0}
+                            onChange={e => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, goals: +e.target.value || 0 } : d) })}
+                            style={{ ...styles.durationInput, width: 40 }} />
+                          <span style={{ color: "#555", fontSize: 12 }}>G</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <button onClick={() => removePlanItem(item.instanceId)} style={styles.removeBtn}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {plan.length > 0 && (
+        <button onClick={handleCopy} style={{ ...styles.copyBtn, ...(copied ? styles.copyBtnDone : {}) }}>
+          {copied ? "✓ コピーしました！" : "📋 テキストをコピー"}
+        </button>
+      )}
+
+      {/* Drill picker */}
+      {showDrillPicker && (
+        <div style={styles.modalBg} onClick={() => { setShowDrillPicker(false); setPendingDrill(null); setPendingSets(1); }}>
+          <div style={styles.modal} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>メニューを選択</span>
+              <button onClick={() => { setShowDrillPicker(false); setPendingDrill(null); setPendingSets(1); }} style={styles.modalClose}>✕</button>
+            </div>
+            {pendingDrill ? (
+              <div style={styles.setsPanel}>
+                <div style={{ color: "#d8d8d8", fontSize: 15, fontWeight: 600, marginBottom: 4 }}>{pendingDrill.name}</div>
+                <div style={{ color: "#666", fontSize: 13, marginBottom: 16 }}>{pendingDrill.duration}分 / セット</div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                  <span style={{ color: "#888", fontSize: 13, minWidth: 64 }}>セット数</span>
+                  <button onClick={() => setPendingSets(s => Math.max(1, s - 1))} style={styles.setsBtn}>－</button>
+                  <span style={{ color: "#fff", fontSize: 20, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{pendingSets}</span>
+                  <button onClick={() => setPendingSets(s => s + 1)} style={styles.setsBtn}>＋</button>
+                </div>
+
+                {pendingSets > 1 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                    <span style={{ color: "#888", fontSize: 13, minWidth: 64 }}>セット間レスト</span>
+                    <button onClick={() => setPendingSetRest(s => Math.max(0, s - 1))} style={styles.setsBtn}>－</button>
+                    <span style={{ color: "#fff", fontSize: 20, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{pendingSetRest}</span>
+                    <button onClick={() => setPendingSetRest(s => s + 1)} style={styles.setsBtn}>＋</button>
+                    <span style={{ color: "#888", fontSize: 13 }}>分</span>
+                  </div>
+                )}
+
+                <div style={{ color: "#4a9eff", fontSize: 13, marginBottom: 20 }}>
+                  合計 = {pendingDrill.duration}分 × {pendingSets}セット{pendingSets > 1 && pendingSetRest > 0 ? ` + レスト${pendingSetRest}分 × ${pendingSets - 1}回` : ""} = <strong>{pendingDrill.duration * pendingSets + pendingSetRest * Math.max(0, pendingSets - 1)}分</strong>
+                </div>
+
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={() => { setPendingDrill(null); setPendingSets(1); setPendingSetRest(0); }}
+                    style={{ ...styles.editBtn, flex: 1, padding: "10px 0", textAlign: "center" }}>← 戻る</button>
+                  <button onClick={confirmAddDrill}
+                    style={{ ...styles.addBtn, flex: 2, padding: "10px 0", textAlign: "center" }}>プランに追加</button>
+                </div>
+              </div>
+            ) : (
+              CATEGORIES_PLAN.map(cat => {
+                const catDrills = drills.filter(d => d.category === cat);
+                if (catDrills.length === 0) return null;
+                return (
+                  <div key={cat}>
+                    <div style={{ ...styles.catHeader, color: CAT_COLOR_PLAN[cat] }}>{cat}</div>
+                    {catDrills.map(drill => {
+                      const ok = canDo(drill);
+                      const reqs = Object.entries(drill.requirements || {});
+                      return (
+                        <button key={drill.id} onClick={() => { if (ok) { setPendingDrill(drill); setPendingSets(1); } }}
+                          style={{ ...styles.drillOption, opacity: ok ? 1 : 0.4, cursor: ok ? "pointer" : "not-allowed" }}>
+                          <div style={styles.drillOptionLeft}>
+                            <span style={styles.drillOptionName}>{drill.name}</span>
+                            <span style={{ color: "#555", fontSize: 12 }}>{drill.duration}分 / セット</span>
+                            {reqs.length > 0 && (
+                              <span style={{ fontSize: 11, color: ok ? "#4a9eff" : "#e8533a" }}>
+                                必要: {reqs.map(([p, n]) => `${p}×${n}`).join(" ")}
+                              </span>
+                            )}
+                          </div>
+                          {ok ? <span style={styles.drillAdd}>選択</span> : <span style={styles.drillLocked}>人数不足</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Rest picker */}
+      {showRestPicker && (
+        <div style={styles.modalBg} onClick={() => setShowRestPicker(false)}>
+          <div style={{ ...styles.modal, paddingBottom: 32 }} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>レストを追加</span>
+              <button onClick={() => setShowRestPicker(false)} style={styles.modalClose}>✕</button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24 }}>
+              <span style={{ color: "#888", fontSize: 14 }}>休憩時間</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <button onClick={() => setRestMin(m => Math.max(1, m - 1))} style={styles.setsBtn}>－</button>
+                <span style={{ color: "#fff", fontSize: 22, fontWeight: 700, minWidth: 36, textAlign: "center" }}>{restMin}</span>
+                <button onClick={() => setRestMin(m => m + 1)} style={styles.setsBtn}>＋</button>
+              </div>
+              <span style={{ color: "#888", fontSize: 14 }}>分</span>
+            </div>
+            <button onClick={addRest} style={{ ...styles.addBtn, width: "100%", padding: "12px 0" }}>追加</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// DRILLS MANAGEMENT TAB
+// ============================================================
+function DrillsTab({ drills, updateDrills }) {
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(null);
+
+  const openNew = () => {
+    setForm({ id: genId(), name: "", duration: 15, category: "OF", description: "", url: "", requirements: {} });
+    setEditing("new");
+  };
+
+  const openEdit = (drill) => {
+    setForm({ ...drill, requirements: { ...drill.requirements } });
+    setEditing(drill.id);
+  };
+
+  const saveForm = async () => {
+    if (!form.name) return;
+    let updated;
+    if (editing === "new") {
+      updated = [...drills, form];
+    } else {
+      updated = drills.map(d => d.id === form.id ? form : d);
+    }
+    await updateDrills(updated);
+    setEditing(null); setForm(null);
+  };
+
+  const deleteDrill = async (id) => {
+    await updateDrills(drills.filter(d => d.id !== id));
+  };
+
+  const setReq = (pos, val) => {
+    const v = parseInt(val);
+    const reqs = { ...form.requirements };
+    if (!v) delete reqs[pos]; else reqs[pos] = v;
+    setForm({ ...form, requirements: reqs });
+  };
+
+  const CATEGORIES = ["OF", "DF", "クリア", "ライド", "GB", "フィジカル"];
+  const CAT_COLOR = { OF: "#e8533a", DF: "#4a9eff", クリア: "#f5a623", ライド: "#c47eff", GB: "#7ed321", フィジカル: "#ff8c42" };
+
+  return (
+    <div style={styles.tabContent}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={{ ...styles.tabTitle, marginBottom: 0 }}>メニュー管理</h2>
+        <button onClick={openNew} style={styles.addBtn}>＋ 新規作成</button>
+      </div>
+
+      {CATEGORIES.map(cat => {
+        const catDrills = drills.filter(d => d.category === cat);
+        return (
+          <Section key={cat} title={cat} color={CAT_COLOR[cat]}>
+            {catDrills.map(drill => (
+              <div key={drill.id} style={styles.drillRow}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={styles.drillName}>{drill.name}</div>
+                  <div style={styles.drillMeta}>
+                    <span style={{ color: "#666" }}>{drill.duration}分</span>
+                    {drill.points > 0 && <span style={{ color: "#f5a623", fontSize: 11 }}>📍{drill.points}ポイント</span>}
+                    {drill.goals > 0 && <span style={{ color: "#7ed321", fontSize: 11 }}>🥅{drill.goals}ゴール</span>}
+                    {Object.entries(drill.requirements || {}).length > 0 && (
+                      <span style={{ color: "#4a9eff", fontSize: 11 }}>
+                        必要: {Object.entries(drill.requirements).map(([p,n]) => `${p}×${n}`).join(" ")}
+                      </span>
+                    )}
+                    {drill.url && (
+                      <a href={drill.url} target="_blank" rel="noopener noreferrer"
+                        style={{ color: "#c47eff", fontSize: 11, textDecoration: "none" }}>🔗 参考</a>
+                    )}
+                  </div>
+                  {drill.description && <div style={styles.drillDesc}>{drill.description}</div>}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => openEdit(drill)} style={styles.editBtn}>編集</button>
+                  <button onClick={() => deleteDrill(drill.id)} style={styles.deleteBtn}>削除</button>
+                </div>
+              </div>
+            ))}
+            {catDrills.length === 0 && <div style={{ color: "#444", fontSize: 13, padding: "8px 0" }}>なし</div>}
+          </Section>
+        );
+      })}
+
+      {/* Edit Modal */}
+      {editing && form && (
+        <div style={styles.modalBg} onClick={() => setEditing(null)}>
+          <div style={styles.modal} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>{editing === "new" ? "メニュー新規作成" : "メニュー編集"}</span>
+              <button onClick={() => setEditing(null)} style={styles.modalClose}>✕</button>
+            </div>
+
+            <Label>メニュー名</Label>
+            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
+              style={styles.input} placeholder="例: キャッチ＆パス" />
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <Label>所要時間（分）</Label>
+                <input type="number" value={form.duration} onChange={e => setForm({ ...form, duration: +e.target.value })}
+                  style={styles.input} min={5} max={120} step={5} />
+              </div>
+              <div>
+                <Label>カテゴリ</Label>
+                <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} style={styles.input}>
+                  {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <Label>概要</Label>
+            <textarea value={form.description || ""} onChange={e => setForm({ ...form, description: e.target.value })}
+              style={{ ...styles.input, height: 72, resize: "vertical" }} placeholder="練習内容の説明を入力" />
+
+            <Label>参考URL</Label>
+            <input value={form.url || ""} onChange={e => setForm({ ...form, url: e.target.value })}
+              style={styles.input} placeholder="https://..." type="url" />
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <Label>ポイント数（エリア分割）</Label>
+                <input type="number" min={0} value={form.points || ""} onChange={e => setForm({ ...form, points: +e.target.value || 0 })}
+                  style={styles.input} placeholder="例: 2" />
+              </div>
+              <div>
+                <Label>ゴール数（枠）</Label>
+                <input type="number" min={0} value={form.goals || ""} onChange={e => setForm({ ...form, goals: +e.target.value || 0 })}
+                  style={styles.input} placeholder="例: 2" />
+              </div>
+            </div>
+
+            <Label>必要人数（0＝不問）</Label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {POSITIONS.map(pos => (
+                <div key={pos} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ ...styles.posBadgeSmall, color: POS_COLOR[pos], borderColor: POS_COLOR[pos] + "55", minWidth: 36, textAlign: "center" }}>{pos}</span>
+                  <input type="number" min={0} max={20} value={form.requirements[pos] || ""}
+                    onChange={e => setReq(pos, e.target.value)}
+                    style={{ ...styles.input, margin: 0, width: "100%" }} placeholder="0" />
+                </div>
+              ))}
+            </div>
+
+            <button onClick={saveForm} style={{ ...styles.addBtn, width: "100%", marginTop: 16, padding: "12px 0" }}>保存</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// ROSTER TAB
+// ============================================================
+function RosterTab({ roster, updateRoster }) {
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(null);
+
+  const openNew = () => {
+    setForm({ id: genId(), name: "", position: "AT", role: "player", grade: "1", campus: "野田" });
+    setEditing("new");
+  };
+
+  const openEdit = (m) => { setForm({ ...m }); setEditing(m.id); };
+
+  const saveForm = async () => {
+    if (!form.name) return;
+    let updated;
+    if (editing === "new") updated = [...roster, { ...form }];
+    else updated = roster.map(m => m.id === form.id ? { ...form } : m);
+    await updateRoster(updated);
+    setEditing(null); setForm(null);
+  };
+
+  const deleteMember = async (id) => {
+    await updateRoster(roster.filter(m => m.id !== id));
+  };
+
+  const players = roster.filter(m => m.role === "player");
+  const coaches = roster.filter(m => m.role === "coach");
+
+  return (
+    <div style={styles.tabContent}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={{ ...styles.tabTitle, marginBottom: 0 }}>メンバー</h2>
+        <button onClick={openNew} style={styles.addBtn}>＋ 追加</button>
+      </div>
+
+      {coaches.length > 0 && (
+        <Section title={`コーチ (${coaches.length})`}>
+          {coaches.map(m => (
+            <div key={m.id} style={styles.rosterRow}>
+              <div style={styles.memberInfo}>
+                <span style={{ ...styles.posBadgeSmall, color: "#aaa", borderColor: "#333" }}>COACH</span>
+                <span style={styles.memberName}>{m.name}</span>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => openEdit(m)} style={styles.editBtn}>編集</button>
+                <button onClick={() => deleteMember(m.id)} style={styles.deleteBtn}>削除</button>
+              </div>
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {POSITIONS.map(pos => {
+        const posPlayers = players.filter(p => p.position === pos);
+        return (
+          <Section key={pos} title={`${pos} (${posPlayers.length})`} color={POS_COLOR[pos]}>
+            {posPlayers.map(m => (
+              <div key={m.id} style={styles.rosterRow}>
+                <div style={styles.memberInfo}>
+                  <span style={{ ...styles.posBadgeSmall, color: POS_COLOR[m.position], borderColor: POS_COLOR[m.position] + "55" }}>{m.position}</span>
+                  <span style={styles.memberName}>{m.name}</span>
+                  {m.grade && <span style={styles.memberNum}>{m.grade === "OB" ? "OB" : `${m.grade}年`}</span>}
+                  {m.campus && <span style={styles.memberNum}>{m.campus}</span>}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => openEdit(m)} style={styles.editBtn}>編集</button>
+                  <button onClick={() => deleteMember(m.id)} style={styles.deleteBtn}>削除</button>
+                </div>
+              </div>
+            ))}
+            {posPlayers.length === 0 && <div style={{ color: "#444", fontSize: 13, padding: "8px 0" }}>登録なし</div>}
+          </Section>
+        );
+      })}
+
+      {/* Edit Modal */}
+      {editing && form && (
+        <div style={styles.modalBg} onClick={() => setEditing(null)}>
+          <div style={styles.modal} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>{editing === "new" ? "メンバー追加" : "メンバー編集"}</span>
+              <button onClick={() => setEditing(null)} style={styles.modalClose}>✕</button>
+            </div>
+
+            <Label>名前</Label>
+            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
+              style={styles.input} placeholder="例: 山田 太郎" />
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <Label>役割</Label>
+                <select value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} style={styles.input}>
+                  <option value="player">選手</option>
+                  <option value="coach">コーチ</option>
+                </select>
+              </div>
+              {form.role === "player" && (
+                <div>
+                  <Label>ポジション</Label>
+                  <select value={form.position} onChange={e => setForm({ ...form, position: e.target.value })} style={styles.input}>
+                    {POSITIONS.map(p => <option key={p}>{p}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <Label>学年</Label>
+                <select value={form.grade || ""} onChange={e => setForm({ ...form, grade: e.target.value })} style={styles.input}>
+                  <option value="">-</option>
+                  {GRADES.map(g => <option key={g} value={g}>{g === "OB" ? "OB" : `${g}年`}</option>)}
+                </select>
+              </div>
+              <div>
+                <Label>キャンパス</Label>
+                <select value={form.campus || ""} onChange={e => setForm({ ...form, campus: e.target.value })} style={styles.input}>
+                  <option value="">-</option>
+                  {CAMPUSES.map(c => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <button onClick={saveForm} style={{ ...styles.addBtn, width: "100%", marginTop: 16, padding: "12px 0" }}>保存</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// EXPORT TAB
+// ============================================================
+
+function ExportTab({ roster, drills, sessions }) {
+  const [exportType, setExportType] = useState("roster");
+  const [format, setFormat] = useState("xlsx");
+  const [planDate, setPlanDate] = useState(today());
+  const [done, setDone] = useState(false);
+
+  const flash = () => { setDone(true); setTimeout(() => setDone(false), 2000); };
+
+  // ---- data builders ----
+  const rosterData = () => {
+    const headers = ["名前", "役割", "ポジション", "学年", "キャンパス"];
+    const rows = roster.map(m => [
+      m.name,
+      m.role === "coach" ? "コーチ" : "選手",
+      m.position || "",
+      m.grade === "OB" ? "OB" : m.grade ? `${m.grade}年` : "",
+      m.campus || "",
+    ]);
+    return { headers, rows, sheetName: "メンバー", filename: "メンバー管理" };
+  };
+
+  const drillsData = () => {
+    const headers = ["メニュー名", "カテゴリ", "時間(分)", "概要", "参考URL", "AT必要", "MF必要", "DF必要", "GK必要"];
+    const rows = drills.map(d => [
+      d.name, d.category, d.duration, d.description || "", d.url || "",
+      d.requirements?.AT || 0, d.requirements?.MF || 0, d.requirements?.DF || 0, d.requirements?.GK || 0,
+    ]);
+    return { headers, rows, sheetName: "メニュー管理", filename: "メニュー管理" };
+  };
+
+  const planData = () => {
+    const session = sessions[planDate] || {};
+    const plan = session.plan || [];
+    const itemMin = (item) => {
+      if (item.type === "rest") return item.duration;
+      const sets = item.sets || 1;
+      return item.duration * sets + (item.setRest || 0) * Math.max(0, sets - 1);
+    };
+    const fmtTime = (mins) => `${String(Math.floor(mins / 60)).padStart(2,"0")}:${String(mins % 60).padStart(2,"0")}`;
+
+    let cursor = null;
+    if (session.startTime) {
+      const [h, m] = session.startTime.split(":").map(Number);
+      cursor = h * 60 + m;
+    }
+
+    const headers = ["開始時刻", "メニュー名", "カテゴリ", "時間(分/セット)", "セット数", "セット間レスト(分)", "合計(分)"];
+    const rows = plan.map(item => {
+      const startT = cursor != null ? fmtTime(cursor) : "";
+      if (cursor != null) cursor += itemMin(item);
+      if (item.type === "rest") return [startT, "レスト", "", "", "", "", item.duration];
+      const sets = item.sets || 1;
+      const setRest = item.setRest || 0;
+      return [startT, item.name, item.category, item.duration, sets, setRest > 0 ? setRest : "", itemMin(item)];
+    });
+
+    const loc = session.location === "その他" ? (session.locationNote || "その他") : (session.location || "");
+    const meta = [
+      ["日付", planDate],
+      ["場所", loc],
+      ["開始", session.startTime || ""],
+      ["合計時間", plan.reduce((s, i) => s + itemMin(i), 0) + "分"],
+      [],
+    ];
+
+    return { headers, rows, meta, sheetName: "練習プラン", filename: `練習プラン_${planDate}` };
+  };
+
+  const getData = () => {
+    if (exportType === "roster") return rosterData();
+    if (exportType === "drills") return drillsData();
+    return planData();
+  };
+
+  const exportCSV = () => {
+    const { headers, rows, meta, filename } = getData();
+    const escape = (v) => {
+      const s = String(v ?? "");
+      return s.includes(",") || s.includes("\n") || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [];
+    if (meta) meta.forEach(r => lines.push(r.map(escape).join(",")));
+    lines.push(headers.map(escape).join(","));
+    rows.forEach(r => lines.push(r.map(escape).join(",")));
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${filename}.csv`;
+    a.click();
+    flash();
+  };
+
+  const exportXLSX = () => {
+    const { headers, rows, meta, sheetName, filename } = getData();
+    const wb = XLSX.utils.book_new();
+    const allRows = [];
+    if (meta) meta.forEach(r => allRows.push(r));
+    allRows.push(headers);
+    rows.forEach(r => allRows.push(r));
+    const ws = XLSX.utils.aoa_to_sheet(allRows);
+    // bold header row
+    const headerRowIdx = meta ? meta.length : 0;
+    headers.forEach((_, ci) => {
+      const cell = ws[XLSX.utils.encode_cell({ r: headerRowIdx, c: ci })];
+      if (cell) cell.s = { font: { bold: true } };
+    });
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, `${filename}.xlsx`);
+    flash();
+  };
+
+  const handleExport = () => format === "csv" ? exportCSV() : exportXLSX();
+
+  const EXPORT_TYPES = [
+    { id: "roster", label: "メンバー管理", icon: "👥", desc: "名前・ポジション・学年・キャンパス" },
+    { id: "drills", label: "メニュー管理", icon: "📋", desc: "全練習メニューと必要人数" },
+    { id: "plan", label: "その日の練習プラン", icon: "🏃", desc: "日付を指定して出力" },
+  ];
+
+  const weekDates = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - 7 + i);
+    return d.toISOString().slice(0, 10);
+  });
+
+  return (
+    <div style={styles.tabContent}>
+      <h2 style={styles.tabTitle}>データ出力</h2>
+
+      {/* Export type selector */}
+      <div style={styles.section}>
+        <div style={styles.sectionTitle}>出力データ</div>
+        {EXPORT_TYPES.map(et => (
+          <button key={et.id} onClick={() => setExportType(et.id)}
+            style={{ ...styles.exportTypeBtn, ...(exportType === et.id ? styles.exportTypeBtnActive : {}) }}>
+            <span style={{ fontSize: 20 }}>{et.icon}</span>
+            <div style={{ textAlign: "left" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: exportType === et.id ? "#e8e8e8" : "#888" }}>{et.label}</div>
+              <div style={{ fontSize: 12, color: "#555", marginTop: 2 }}>{et.desc}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {/* Date picker for plan */}
+      {exportType === "plan" && (
+        <div style={styles.section}>
+          <div style={styles.sectionTitle}>日付を選択</div>
+          <select value={planDate} onChange={e => setPlanDate(e.target.value)} style={styles.input}>
+            {weekDates.map(d => {
+              const hasPlan = (sessions[d]?.plan?.length || 0) > 0;
+              return <option key={d} value={d}>{d}{hasPlan ? " ✓" : ""}</option>;
+            })}
+          </select>
+          {!(sessions[planDate]?.plan?.length) &&
+            <div style={styles.emptyNote}>この日のプランはまだありません</div>}
+        </div>
+      )}
+
+      {/* Format */}
+      <div style={styles.section}>
+        <div style={styles.sectionTitle}>ファイル形式</div>
+        <div style={{ display: "flex", gap: 10 }}>
+          {["xlsx", "csv"].map(f => (
+            <button key={f} onClick={() => setFormat(f)}
+              style={{ ...styles.formatBtn, ...(format === f ? styles.formatBtnActive : {}) }}>
+              {f === "xlsx" ? "📊 Excel (.xlsx)" : "📄 CSV (.csv)"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Export button */}
+      <button onClick={handleExport}
+        style={{ ...styles.addBtn, width: "100%", padding: "14px 0", fontSize: 15, marginTop: 8, ...(done ? { background: "#7ed321" } : {}) }}>
+        {done ? "✓ 出力しました！" : `⬇ ${format.toUpperCase()}で出力`}
+      </button>
+    </div>
+  );
+}
+
+// ============================================================
+// SHARED COMPONENTS
+// ============================================================
+function Section({ title, color, children }) {
+  return (
+    <div style={styles.section}>
+      <div style={{ ...styles.sectionTitle, color: color || "#888" }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Label({ children }) {
+  return <div style={styles.label}>{children}</div>;
+}
+
+// ============================================================
+// STYLES
+// ============================================================
+const styles = {
+  app: { minHeight: "100vh", background: "#0c0c0e", color: "#e8e8e8", fontFamily: "'DM Sans', 'Noto Sans JP', sans-serif" },
+  loading: { minHeight: "100vh", background: "#0c0c0e", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12 },
+  loadingDot: { width: 8, height: 8, borderRadius: "50%", background: "#4a9eff", animation: "pulse 1s infinite" },
+
+  header: { borderBottom: "1px solid #1e1e24", background: "#0c0c0e", position: "sticky", top: 0, zIndex: 100 },
+  headerInner: { maxWidth: 680, margin: "0 auto", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" },
+  logo: { display: "flex", alignItems: "center", gap: 10 },
+  logoIcon: { fontSize: 22, color: "#e8533a" },
+  logoText: { fontSize: 13, fontWeight: 700, lineHeight: 1.2, letterSpacing: "0.08em", color: "#e8e8e8" },
+  logoSub: { color: "#e8533a", fontSize: 11 },
+  nav: { display: "flex", gap: 4 },
+  navBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "6px 10px", borderRadius: 8, border: "none", background: "transparent", color: "#555", cursor: "pointer", transition: "all 0.15s" },
+  navBtnActive: { background: "#1a1a22", color: "#e8e8e8" },
+
+  main: { maxWidth: 680, margin: "0 auto", padding: "0 0 80px" },
+  tabContent: { padding: "24px 16px" },
+  tabTitle: { fontSize: 22, fontWeight: 700, marginBottom: 20, letterSpacing: "-0.02em" },
+
+  dateStrip: { display: "flex", gap: 6, marginBottom: 20, overflowX: "auto", paddingBottom: 4 },
+  dateBtn: { display: "flex", flexDirection: "column", alignItems: "center", padding: "8px 10px", borderRadius: 10, border: "1px solid #1e1e24", background: "#111116", color: "#555", cursor: "pointer", minWidth: 46, position: "relative", transition: "all 0.15s" },
+  dateBtnActive: { background: "#1a1a30", border: "1px solid #4a9eff55", color: "#e8e8e8" },
+  dateBtnToday: { borderColor: "#e8533a55" },
+  dateDot: { width: 5, height: 5, borderRadius: "50%", background: "#4a9eff", position: "absolute", bottom: 4 },
+
+  posSummary: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 20 },
+  posCard: { borderRadius: 10, padding: "10px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 },
+  posBadge: { fontSize: 11, fontWeight: 700, letterSpacing: "0.05em" },
+  posCount: { fontSize: 20, fontWeight: 700, color: "#e8e8e8" },
+
+  section: { marginBottom: 20 },
+  sectionTitle: { fontSize: 12, fontWeight: 700, letterSpacing: "0.08em", marginBottom: 8, textTransform: "uppercase" },
+
+  attendRow: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid #1a1a20" },
+  memberInfo: { display: "flex", alignItems: "center", gap: 8 },
+  memberName: { fontSize: 14, color: "#d8d8d8" },
+  memberNum: { fontSize: 11, color: "#555" },
+  posBadgeSmall: { fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, border: "1px solid", letterSpacing: "0.05em" },
+  attendBtns: { display: "flex", gap: 6 },
+  attendBtn: { width: 34, height: 34, borderRadius: 8, border: "1px solid #2a2a32", background: "#111116", color: "#444", cursor: "pointer", fontSize: 14, transition: "all 0.15s" },
+  attendPresent: { background: "#0f2a1a", border: "1px solid #7ed32155", color: "#7ed321" },
+  attendAbsent: { background: "#2a0f0f", border: "1px solid #e8533a55", color: "#e8533a" },
+  attendLate: { background: "#2a1f0a", border: "1px solid #f5a62355", color: "#f5a623" },
+
+  totalBar: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: "#111116", borderRadius: 12, border: "1px solid #1e1e24", marginTop: 8 },
+
+  timeBar: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#111116", border: "1px solid #1e1e24", borderRadius: 12, padding: "12px 16px", marginBottom: 16 },
+  timeInput: { background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 8, color: "#e8e8e8", padding: "6px 10px", fontSize: 15, outline: "none", fontWeight: 600, width: 110 },
+  planTimeCol: { display: "flex", flexDirection: "column", alignItems: "center", minWidth: 42 },
+  planTimeLabel: { fontSize: 12, fontWeight: 700, color: "#4a9eff", letterSpacing: "0.02em" },
+  planItemRest: { background: "#0f0f14", border: "1px solid #2a2a3a", opacity: 0.8 },
+  restIcon: { fontSize: 16 },
+  restBtn: { padding: "8px 14px", borderRadius: 8, border: "1px solid #2a2a3a", background: "transparent", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600 },
+  setsPanel: { background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 12, padding: "16px", marginBottom: 8 },
+  setsBtn: { width: 36, height: 36, borderRadius: 8, border: "1px solid #2a2a3a", background: "#1a1a22", color: "#e8e8e8", cursor: "pointer", fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center" },
+
+  orderBtns: { display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 },
+  orderBtn: { width: 24, height: 22, borderRadius: 4, border: "1px solid #2a2a3a", background: "#111116", color: "#666", cursor: "pointer", fontSize: 9, lineHeight: 1, padding: 0 },
+  durationInput: { width: 44, background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 6, color: "#e8e8e8", padding: "3px 6px", fontSize: 13, outline: "none", textAlign: "center" },
+
+  locationBar: { display: "flex", alignItems: "center", gap: 10, marginBottom: 16 },
+  locationBtns: { display: "flex", gap: 6, flexWrap: "wrap" },
+  locationBtn: { padding: "5px 10px", borderRadius: 6, border: "1px solid #2a2a3a", background: "transparent", color: "#666", cursor: "pointer", fontSize: 12, fontWeight: 600 },
+  locationBtnActive: { background: "#1a2030", border: "1px solid #4a9eff55", color: "#4a9eff" },
+
+  exportTypeBtn: { width: "100%", display: "flex", alignItems: "center", gap: 14, padding: "12px 14px", borderRadius: 12, border: "1px solid #1e1e24", background: "#111116", cursor: "pointer", marginBottom: 8, transition: "all 0.15s" },
+  exportTypeBtnActive: { background: "#1a1a2a", border: "1px solid #4a9eff55" },
+  formatBtn: { flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid #2a2a3a", background: "transparent", color: "#666", cursor: "pointer", fontSize: 13, fontWeight: 600 },
+  formatBtnActive: { background: "#1a2030", border: "1px solid #4a9eff55", color: "#4a9eff" },
+
+  focusSection: { marginTop: 20, background: "#111116", border: "1px solid #1e1e24", borderRadius: 14, padding: "16px 14px" },
+  focusTitle: { fontSize: 14, fontWeight: 700, color: "#e8e8e8", marginBottom: 14 },
+  focusRow: { display: "flex", alignItems: "flex-start", gap: 6, marginBottom: 6 },
+  focusInput: { flex: 1, background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 8, color: "#d8d8d8", padding: "6px 8px", fontSize: 13, outline: "none", resize: "none", lineHeight: 1.5, fontFamily: "inherit" },
+  focusRemoveBtn: { width: 22, height: 22, borderRadius: 4, border: "none", background: "#2a1010", color: "#e8533a", cursor: "pointer", fontSize: 10, flexShrink: 0, marginTop: 4 },
+  focusAddBtn: { fontSize: 12, fontWeight: 600, background: "transparent", border: "none", cursor: "pointer", padding: "4px 0", marginTop: 2 },
+
+  viewToggleBtn: { padding: "6px 12px", borderRadius: 8, border: "1px solid #2a2a3a", background: "transparent", color: "#555", cursor: "pointer", fontSize: 12, fontWeight: 600 },
+  viewToggleBtnActive: { background: "#1a1a22", border: "1px solid #4a9eff55", color: "#e8e8e8" },
+
+  monthNav: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+  monthNavBtn: { width: 36, height: 36, borderRadius: 8, border: "1px solid #2a2a3a", background: "#111116", color: "#888", cursor: "pointer", fontSize: 20 },
+  monthLabel: { fontSize: 16, fontWeight: 700, color: "#e8e8e8" },
+
+  calGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 },
+  calDayLabel: { textAlign: "center", fontSize: 11, fontWeight: 700, padding: "4px 0", letterSpacing: "0.04em" },
+  calDay: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, padding: "6px 2px", borderRadius: 8, border: "1px solid #1e1e24", background: "#0c0c0e", cursor: "pointer", minHeight: 52, position: "relative" },
+  calDaySelected: { outline: "2px solid #4a9eff", outlineOffset: 1 },
+  calDayToday: { borderColor: "#e8533a55" },
+  calPlanDot: { width: 5, height: 5, borderRadius: "50%", background: "#4a9eff", position: "absolute", bottom: 4 },
+  calLegend: { display: "flex", flexWrap: "wrap", gap: "6px 14px", marginTop: 14, padding: "10px 0" },
+
+  eventTypeBar: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  eventTypeBadge: { fontSize: 13, fontWeight: 700, padding: "4px 12px", borderRadius: 20, letterSpacing: "0.04em" },
+  eventNote: { color: "#888", fontSize: 13, padding: "6px 10px", background: "#111116", borderRadius: 8, marginBottom: 10, border: "1px solid #1e1e24" },
+  eventTypeOption: { width: "100%", padding: "12px 16px", borderRadius: 10, cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "left", transition: "all 0.15s" },
+  toPlanBtn: { width: "100%", padding: "11px 0", borderRadius: 10, border: "1px solid #2a2a3a", background: "#111116", color: "#4a9eff", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16, textAlign: "center" },
+
+  copyBtn: { width: "100%", marginTop: 16, padding: "13px 0", borderRadius: 10, border: "1px solid #2a2a3a", background: "#111116", color: "#aaa", cursor: "pointer", fontSize: 14, fontWeight: 600, transition: "all 0.2s" },
+  copyBtnDone: { background: "#0f2a1a", border: "1px solid #7ed32155", color: "#7ed321" },
+
+  planHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
+  planLabel: { fontSize: 14, color: "#888", fontWeight: 600 },
+  planTime: { fontSize: 13, color: "#4a9eff", marginLeft: 8 },
+  emptyNote: { background: "#2a1a0a", border: "1px solid #f5a62333", borderRadius: 10, padding: "10px 14px", fontSize: 13, color: "#f5a623", marginBottom: 16 },
+  emptyPlan: { padding: "32px 0", textAlign: "center", color: "#444", fontSize: 14 },
+  planList: { display: "flex", flexDirection: "column", gap: 8 },
+  planItem: { display: "flex", alignItems: "center", justifyContent: "space-between", background: "#111116", border: "1px solid #1e1e24", borderRadius: 12, padding: "12px 14px" },
+  planItemLeft: { display: "flex", alignItems: "center", gap: 12 },
+  planNum: { width: 24, height: 24, borderRadius: "50%", background: "#1a1a2a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#4a9eff", fontWeight: 700, flexShrink: 0 },
+  planItemName: { fontSize: 14, color: "#d8d8d8", marginBottom: 4 },
+  planItemMeta: { display: "flex", gap: 8, alignItems: "center" },
+  catBadge: { fontSize: 11, fontWeight: 600 },
+  removeBtn: { width: 28, height: 28, borderRadius: 6, border: "none", background: "#1e1016", color: "#e8533a", cursor: "pointer", fontSize: 12 },
+
+  addBtn: { padding: "8px 16px", borderRadius: 8, border: "none", background: "#e8533a", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600 },
+
+  modalBg: { position: "fixed", inset: 0, background: "#000000aa", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 200 },
+  modal: { background: "#111116", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 680, maxHeight: "80vh", overflowY: "auto", padding: "20px 16px 40px" },
+  modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 },
+  modalTitle: { fontSize: 16, fontWeight: 700 },
+  modalClose: { width: 30, height: 30, borderRadius: "50%", border: "none", background: "#1e1e24", color: "#888", cursor: "pointer", fontSize: 16 },
+
+  catHeader: { fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "12px 0 4px" },
+  drillOption: { width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #1a1a20", background: "transparent", border: "none", borderBottom: "1px solid #1a1a20", textAlign: "left" },
+  drillOptionLeft: { display: "flex", flexDirection: "column", gap: 3 },
+  drillOptionName: { fontSize: 14, color: "#d8d8d8" },
+  drillAdd: { padding: "4px 10px", borderRadius: 6, background: "#1a2a1a", color: "#7ed321", fontSize: 12, fontWeight: 600, border: "1px solid #7ed32133" },
+  drillLocked: { padding: "4px 10px", borderRadius: 6, background: "#2a1010", color: "#e8533a", fontSize: 12, border: "1px solid #e8533a33" },
+
+  drillDesc: { fontSize: 12, color: "#555", marginTop: 4, lineHeight: 1.5 },
+  drillName: { fontSize: 14, color: "#d8d8d8", marginBottom: 4 },
+  drillMeta: { display: "flex", gap: 8, alignItems: "center" },
+
+  rosterRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid #1a1a20" },
+
+  editBtn: { padding: "4px 10px", borderRadius: 6, border: "1px solid #2a2a3a", background: "transparent", color: "#888", cursor: "pointer", fontSize: 12 },
+  deleteBtn: { padding: "4px 10px", borderRadius: 6, border: "none", background: "#2a1010", color: "#e8533a", cursor: "pointer", fontSize: 12 },
+
+  input: { width: "100%", boxSizing: "border-box", background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 8, color: "#e8e8e8", padding: "10px 12px", fontSize: 14, marginBottom: 14, outline: "none" },
+  label: { fontSize: 12, color: "#666", marginBottom: 6, fontWeight: 600, letterSpacing: "0.04em" },
+};
+
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
