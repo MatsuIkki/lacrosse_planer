@@ -692,6 +692,23 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
         </div>
       </div>
 
+      {/* 前回コピーボタン */}
+      {plan.length === 0 && (() => {
+        const prevDate = Object.keys(sessions)
+          .filter(d => d < selectedDate && (sessions[d]?.plan?.length > 0))
+          .sort().slice(-1)[0];
+        if (!prevDate) return null;
+        const prevPlan = sessions[prevDate].plan;
+        return (
+          <button onClick={async () => {
+            const copied = prevPlan.map(item => ({ ...item, instanceId: genId() }));
+            await saveSession({ plan: copied });
+          }} style={styles.prevCopyBtn}>
+            📋 前回（{prevDate.slice(5).replace("-","/")}）のプランをコピー
+          </button>
+        );
+      })()}
+
       {plan.length === 0 ? (
         <div style={styles.emptyPlan}>メニューを追加して練習プランを作りましょう</div>
       ) : (
@@ -1499,6 +1516,8 @@ const styles = {
   eventNote: { color: "#888", fontSize: 13, padding: "6px 10px", background: "#111116", borderRadius: 8, marginBottom: 10, border: "1px solid #1e1e24" },
   eventTypeOption: { width: "100%", padding: "12px 16px", borderRadius: 10, cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "left", transition: "all 0.15s" },
   toPlanBtn: { width: "100%", padding: "11px 0", borderRadius: 10, border: "1px solid #2a2a3a", background: "#111116", color: "#4a9eff", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16, textAlign: "center" },
+
+  prevCopyBtn: { width: "100%", padding: "11px 0", borderRadius: 10, border: "1px dashed #2a2a3a", background: "transparent", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 12 },
 
   copyBtn: { width: "100%", marginTop: 16, padding: "13px 0", borderRadius: 10, border: "1px solid #2a2a3a", background: "#111116", color: "#aaa", cursor: "pointer", fontSize: 14, fontWeight: 600, transition: "all 0.2s" },
   copyBtnDone: { background: "#0f2a1a", border: "1px solid #7ed32155", color: "#7ed321" },
