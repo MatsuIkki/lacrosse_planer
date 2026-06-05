@@ -112,6 +112,9 @@ function App() {
     setPlanDate(date);
     setTab("plan");
   };
+  const goToSchedule = (date) => {
+    setTab("schedule");
+  };
   const updateRoster = async (r) => { setRoster(r); await save(KEYS.roster, r); };
   const updateDrills = async (d) => { setDrills(d); await save(KEYS.drills, d); };
   const updateSessions = async (s) => { setSessions(s); await save(KEYS.sessions, s); };
@@ -157,7 +160,7 @@ function App() {
       {/* Content */}
       <main style={styles.main}>
         {tab === "schedule" && focus !== null && <ScheduleTab roster={roster} sessions={sessions} updateSessions={updateSessions} onGoToPlan={goToPlan} focus={focus} updateFocus={updateFocus} />}
-        {tab === "plan" && <PlanTab roster={roster} drills={drills} sessions={sessions} updateSessions={updateSessions} initialDate={planDate} />}
+        {tab === "plan" && <PlanTab roster={roster} drills={drills} sessions={sessions} updateSessions={updateSessions} initialDate={planDate} onGoToSchedule={goToSchedule} />}
         {tab === "drills" && <DrillsTab drills={drills} updateDrills={updateDrills} />}
         {tab === "roster" && <RosterTab roster={roster} updateRoster={updateRoster} />}
         {tab === "export" && <ExportTab roster={roster} drills={drills} sessions={sessions} updateRoster={updateRoster} updateDrills={updateDrills} updateSessions={updateSessions} />}
@@ -504,10 +507,11 @@ const LOCATIONS = ["第五", "第三", "ラグビー場", "金町", "その他"]
 const CATEGORIES_PLAN = ["OF", "DF", "クリア", "ライド", "GB", "フィジカル"];
 const CAT_COLOR_PLAN = { OF: "#e8533a", DF: "#4a9eff", クリア: "#f5a623", ライド: "#c47eff", GB: "#7ed321", フィジカル: "#ff8c42" };
 
-function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
+function PlanTab({ roster, drills, sessions, updateSessions, initialDate, onGoToSchedule }) {
   const [selectedDate, setSelectedDate] = useState(initialDate || today());
   const [showDrillPicker, setShowDrillPicker] = useState(false);
   const [showRestPicker, setShowRestPicker] = useState(false);
+  const [showAttendance, setShowAttendance] = useState(false);
   const [restMin, setRestMin] = useState(5);
   const [pendingDrill, setPendingDrill] = useState(null);
   const [pendingSets, setPendingSets] = useState(1);
@@ -528,10 +532,11 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
     Object.entries(drill.requirements || {}).every(([pos, needed]) => (presentByPos[pos] || 0) >= needed);
 
   const itemMin = (item) => {
-    if (item.type === "rest") return item.duration;
+    if (item.type === "rest" || item.type === "buffer") return item.duration || 0;
     const sets = item.sets || 1;
     const setRest = item.setRest || 0;
-    return item.duration * sets + setRest * Math.max(0, sets - 1);
+    const buffer = item.buffer || 0;
+    return item.duration * sets + setRest * Math.max(0, sets - 1) + buffer;
   };
   const totalMin = plan.reduce((s, d) => s + itemMin(d), 0);
 
@@ -588,9 +593,14 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
         lines.push(`${prefix}レスト${item.duration}分`);
         return;
       }
+      if (item.type === "buffer") {
+        lines.push(`${prefix}バッファ${item.duration}分`);
+        return;
+      }
 
       const sets = item.sets || 1;
       const setRest = item.setRest || 0;
+      const buffer = item.buffer || 0;
 
       let timeStr;
       if (sets === 1) {
@@ -599,6 +609,7 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
         timeStr = `${item.duration}'×${sets}`;
         if (setRest > 0) timeStr += `（間${setRest}'）`;
       }
+      if (buffer > 0) timeStr += `＋バッファ${buffer}'`;
 
       const sub = [];
       if (item.points > 0) sub.push(`${item.points}ポイント`);
@@ -628,9 +639,18 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
   });
   const dayLabel = (d) => ["日","月","火","水","木","金","土"][new Date(d + "T00:00:00").getDay()];
 
+  const toggleAttend = async (id, status) => {
+    const prev = session.attendance[id];
+    const next = prev === status ? undefined : status;
+    await updateSessions({ ...sessions, [selectedDate]: { ...session, attendance: { ...session.attendance, [id]: next } } });
+  };
+
   return (
     <div style={styles.tabContent}>
-      <h2 style={styles.tabTitle}>練習プラン作成</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ ...styles.tabTitle, marginBottom: 0 }}>練習プラン作成</h2>
+        <button onClick={() => onGoToSchedule(selectedDate)} style={styles.editBtn}>📋 出欠入力→</button>
+      </div>
 
       <div style={styles.dateStrip}>
         {weekDates.map(d => (
@@ -652,8 +672,43 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
         ))}
       </div>
 
-      {totalPresent === 0 && (
-        <div style={styles.emptyNote}>⚠️ この日の出欠が未入力です。スケジュールタブで入力してください。</div>
+      {/* 簡易出欠 */}
+      <button onClick={() => setShowAttendance(v => !v)}
+        style={{ ...styles.restBtn, width: "100%", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 14px" }}>
+        <span>👥 出欠入力（{totalPresent}名参加）</span>
+        <span style={{ fontSize: 12 }}>{showAttendance ? "▲ 閉じる" : "▼ 開く"}</span>
+      </button>
+      {showAttendance && (
+        <div style={{ background: "#111116", border: "1px solid #1e1e24", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+          <button onClick={async () => {
+            const all = {};
+            roster.forEach(m => { all[m.id] = "present"; });
+            await updateSessions({ ...sessions, [selectedDate]: { ...session, attendance: all } });
+          }} style={{ ...styles.allPresentBtn, marginBottom: 12 }}>✓ 全員参加</button>
+          {POSITIONS.map(pos => {
+            const posPlayers = roster.filter(m => m.role === "player" && m.position === pos);
+            if (!posPlayers.length) return null;
+            return (
+              <div key={pos} style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: POS_COLOR[pos], marginBottom: 4 }}>{pos}</div>
+                {posPlayers.map(p => (
+                  <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: "1px solid #1a1a20" }}>
+                    <span style={{ fontSize: 13, color: "#d8d8d8" }}>{p.name}</span>
+                    <div style={styles.attendBtns}>
+                      <button onClick={() => toggleAttend(p.id, "present")} style={{ ...styles.attendBtn, ...(session.attendance[p.id] === "present" ? styles.attendPresent : {}) }}>○</button>
+                      <button onClick={() => toggleAttend(p.id, "absent")} style={{ ...styles.attendBtn, ...(session.attendance[p.id] === "absent" ? styles.attendAbsent : {}) }}>✕</button>
+                      <button onClick={() => toggleAttend(p.id, "late")} style={{ ...styles.attendBtn, ...(session.attendance[p.id] === "late" ? styles.attendLate : {}) }}>△</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {totalPresent === 0 && !showAttendance && (
+        <div style={styles.emptyNote}>⚠️ この日の出欠が未入力です。</div>
       )}
 
       {/* Start time bar */}
@@ -718,106 +773,31 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
         <div style={styles.planList}>
           {plan.map((item, i) => {
             const isRest = item.type === "rest";
+            const isBuffer = item.type === "buffer";
             const mins = itemMin(item);
             const startT = scheduledTimes[i] != null ? fmtTime(scheduledTimes[i]) : null;
 
             const moveUp = async () => {
               if (i === 0) return;
-              const p = [...plan];
-              [p[i - 1], p[i]] = [p[i], p[i - 1]];
+              const p = [...plan]; [p[i-1], p[i]] = [p[i], p[i-1]];
               await saveSession({ plan: p });
             };
             const moveDown = async () => {
               if (i === plan.length - 1) return;
-              const p = [...plan];
-              [p[i], p[i + 1]] = [p[i + 1], p[i]];
-              await saveSession({ plan: p });
-            };
-            const updateDuration = async (val) => {
-              if (val === "" || val === "0") return;
-              const v = Math.max(0.5, parseFloat(val) || 0.5);
-              const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, duration: v } : d);
-              await saveSession({ plan: p });
-            };
-            const updateSetsInline = async (val) => {
-              if (val === "" || val === "0") return;
-              const v = Math.max(1, parseInt(val) || 1);
-              const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, sets: v } : d);
+              const p = [...plan]; [p[i], p[i+1]] = [p[i+1], p[i]];
               await saveSession({ plan: p });
             };
 
+            // onBlurで保存、onChangeはローカル表示のみ → PlanItemコンポーネントで管理
             return (
-              <div key={item.instanceId} style={{ ...styles.planItem, ...(isRest ? styles.planItemRest : {}) }}>
-                {/* up/down buttons */}
-                <div style={styles.orderBtns}>
-                  <button onClick={moveUp} disabled={i === 0}
-                    style={{ ...styles.orderBtn, opacity: i === 0 ? 0.2 : 1 }}>▲</button>
-                  <button onClick={moveDown} disabled={i === plan.length - 1}
-                    style={{ ...styles.orderBtn, opacity: i === plan.length - 1 ? 0.2 : 1 }}>▼</button>
-                </div>
-
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-                  {/* time */}
-                  <div style={styles.planTimeCol}>
-                    {startT ? <span style={styles.planTimeLabel}>{startT}</span> : <span style={styles.planNum}>{i + 1}</span>}
-                  </div>
-
-                  {/* content */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {isRest ? (
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ color: "#888", fontSize: 14 }}>レスト</span>
-                        <input type="number" min={1} value={item.duration || ""}
-                          onChange={e => updateDuration(e.target.value)}
-                          style={styles.durationInput} />
-                        <span style={{ color: "#666", fontSize: 12 }}>分</span>
-                      </div>
-                    ) : (
-                      <>
-                        <div style={styles.planItemName}>{item.name}</div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
-                          <span style={{ ...styles.catBadge, color: CAT_COLOR_PLAN[item.category] }}>{item.category}</span>
-                          <input type="number" min={0.5} step={0.5} value={item.duration || ""}
-                            onChange={e => updateDuration(e.target.value)}
-                            style={styles.durationInput} />
-                          <span style={{ color: "#666", fontSize: 12 }}>分 ×</span>
-                          <input type="number" min={1} value={item.sets || ""}
-                            onChange={e => updateSetsInline(e.target.value)}
-                            style={styles.durationInput} />
-                          <span style={{ color: "#666", fontSize: 12 }}>セット</span>
-                          {(item.sets || 1) > 1 && (
-                            <>
-                              <span style={{ color: "#555", fontSize: 12 }}>レスト</span>
-                              <input type="number" min={0} value={item.setRest || ""}
-                                onChange={e => {
-                                  const v = Math.max(0, parseInt(e.target.value) || 0);
-                                  saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, setRest: v } : d) });
-                                }}
-                                style={styles.durationInput} />
-                              <span style={{ color: "#555", fontSize: 12 }}>分/間</span>
-                            </>
-                          )}
-                          <span style={{ color: "#4a9eff", fontSize: 12, fontWeight: 600 }}>= {Math.ceil(mins)}分</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-                          <span style={{ color: "#555", fontSize: 12 }}>📍</span>
-                          <input type="number" min={0} value={item.points || ""}
-                            onChange={e => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, points: +e.target.value || 0 } : d) })}
-                            style={{ ...styles.durationInput, width: 40 }} />
-                          <span style={{ color: "#555", fontSize: 12 }}>P</span>
-                          <span style={{ color: "#555", fontSize: 12, marginLeft: 6 }}>🥅</span>
-                          <input type="number" min={0} value={item.goals || ""}
-                            onChange={e => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, goals: +e.target.value || 0 } : d) })}
-                            style={{ ...styles.durationInput, width: 40 }} />
-                          <span style={{ color: "#555", fontSize: 12 }}>G</span>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <button onClick={() => removePlanItem(item.instanceId)} style={styles.removeBtn}>✕</button>
-              </div>
+              <PlanItem key={item.instanceId}
+                item={item} i={i} total={plan.length}
+                startT={startT} mins={mins}
+                isRest={isRest} isBuffer={isBuffer}
+                onMoveUp={moveUp} onMoveDown={moveDown}
+                onRemove={() => removePlanItem(item.instanceId)}
+                onSave={(patch) => saveSession({ plan: plan.map(d => d.instanceId === item.instanceId ? { ...d, ...patch } : d) })}
+              />
             );
           })}
         </div>
@@ -1126,6 +1106,7 @@ function RosterTab({ roster, updateRoster }) {
               <div style={styles.memberInfo}>
                 <span style={{ ...styles.posBadgeSmall, color: "#aaa", borderColor: "#333" }}>COACH</span>
                 <span style={styles.memberName}>{m.name}</span>
+                {m.campus && <span style={styles.memberNum}>{m.campus}</span>}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => openEdit(m)} style={styles.editBtn}>編集</button>
@@ -1136,28 +1117,23 @@ function RosterTab({ roster, updateRoster }) {
         </Section>
       )}
 
-      {POSITIONS.map(pos => {
-        const posPlayers = players.filter(p => p.position === pos);
-        return (
-          <Section key={pos} title={`${pos} (${posPlayers.length})`} color={POS_COLOR[pos]}>
-            {posPlayers.map(m => (
-              <div key={m.id} style={styles.rosterRow}>
-                <div style={styles.memberInfo}>
-                  <span style={{ ...styles.posBadgeSmall, color: POS_COLOR[m.position], borderColor: POS_COLOR[m.position] + "55" }}>{m.position}</span>
-                  <span style={styles.memberName}>{m.name}</span>
-                  {m.grade && <span style={styles.memberNum}>{m.grade === "OB" ? "OB" : `${m.grade}年`}</span>}
-                  {m.campus && <span style={styles.memberNum}>{m.campus}</span>}
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => openEdit(m)} style={styles.editBtn}>編集</button>
-                  <button onClick={() => deleteMember(m.id)} style={styles.deleteBtn}>削除</button>
-                </div>
-              </div>
-            ))}
-            {posPlayers.length === 0 && <div style={{ color: "#444", fontSize: 13, padding: "8px 0" }}>登録なし</div>}
-          </Section>
-        );
-      })}
+      <Section title={`選手 (${players.length})`}>
+        {players.length === 0 && <div style={{ color: "#444", fontSize: 13, padding: "8px 0" }}>登録なし</div>}
+        {players.map(m => (
+          <div key={m.id} style={styles.rosterRow}>
+            <div style={styles.memberInfo}>
+              <span style={{ ...styles.posBadgeSmall, color: POS_COLOR[m.position], borderColor: POS_COLOR[m.position] + "55" }}>{m.position}</span>
+              <span style={styles.memberName}>{m.name}</span>
+              {m.grade && <span style={styles.memberNum}>{m.grade === "OB" ? "OB" : `${m.grade}年`}</span>}
+              {m.campus && <span style={styles.memberNum}>{m.campus}</span>}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => openEdit(m)} style={styles.editBtn}>編集</button>
+              <button onClick={() => deleteMember(m.id)} style={styles.deleteBtn}>削除</button>
+            </div>
+          </div>
+        ))}
+      </Section>
 
       {/* Edit Modal */}
       {editing && form && (
@@ -1560,6 +1536,147 @@ function ExportTab({ roster, drills, sessions, updateRoster, updateDrills, updat
 }
 
 // ============================================================
+// PLAN ITEM COMPONENT
+// ============================================================
+function PlanItem({ item, i, total, startT, mins, isRest, isBuffer, onMoveUp, onMoveDown, onRemove, onSave }) {
+  const [localVals, setLocalVals] = useState({
+    duration: String(item.duration || ""),
+    sets: String(item.sets || 1),
+    setRest: String(item.setRest || 0),
+    buffer: String(item.buffer || 0),
+    points: String(item.points || 0),
+    goals: String(item.goals || 0),
+  });
+  const [errors, setErrors] = useState({});
+
+  useEffect(() => {
+    setLocalVals({
+      duration: String(item.duration || ""),
+      sets: String(item.sets || 1),
+      setRest: String(item.setRest || 0),
+      buffer: String(item.buffer || 0),
+      points: String(item.points || 0),
+      goals: String(item.goals || 0),
+    });
+  }, [item.instanceId]);
+
+  const set = (key, val) => {
+    setLocalVals(prev => ({ ...prev, [key]: val }));
+    if (val !== "" && val !== "0") setErrors(prev => ({ ...prev, [key]: false }));
+  };
+
+  const commit = (key, min, isFloat) => {
+    const raw = localVals[key];
+    const parsed = isFloat ? parseFloat(raw) : parseInt(raw);
+    if (!raw || isNaN(parsed) || parsed <= 0) {
+      setErrors(prev => ({ ...prev, [key]: true }));
+      return;
+    }
+    const v = Math.max(min, parsed);
+    setLocalVals(prev => ({ ...prev, [key]: String(v) }));
+    setErrors(prev => ({ ...prev, [key]: false }));
+    onSave({ [key]: v });
+  };
+
+  const commitOptional = (key) => {
+    const v = Math.max(0, parseFloat(localVals[key]) || 0);
+    setLocalVals(prev => ({ ...prev, [key]: String(v) }));
+    onSave({ [key]: v });
+  };
+
+  const CAT_COLOR_PLAN = { OF: "#e8533a", DF: "#4a9eff", クリア: "#f5a623", ライド: "#c47eff", GB: "#7ed321", フィジカル: "#ff8c42" };
+  const errStyle = { borderColor: "#e8533a" };
+  const errMsg = <span style={{ color: "#e8533a", fontSize: 10 }}>値を入力してください</span>;
+
+  return (
+    <div style={{ ...styles.planItem, ...(isRest ? styles.planItemRest : {}), ...(isBuffer ? styles.planItemBuffer : {}) }}>
+      <div style={styles.orderBtns}>
+        <button onClick={onMoveUp} disabled={i === 0} style={{ ...styles.orderBtn, opacity: i === 0 ? 0.2 : 1 }}>▲</button>
+        <button onClick={onMoveDown} disabled={i === total - 1} style={{ ...styles.orderBtn, opacity: i === total - 1 ? 0.2 : 1 }}>▼</button>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+        <div style={styles.planTimeCol}>
+          {startT ? <span style={styles.planTimeLabel}>{startT}</span> : <span style={styles.planNum}>{i + 1}</span>}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {(isRest || isBuffer) ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ color: isBuffer ? "#f5a623" : "#888", fontSize: 14 }}>{isBuffer ? "バッファ" : "レスト"}</span>
+              <input type="number" min={0.5} step={0.5}
+                value={localVals.duration}
+                onChange={e => set("duration", e.target.value)}
+                onBlur={() => commit("duration", 0.5, true)}
+                style={{ ...styles.durationInput, ...(errors.duration ? errStyle : {}) }} />
+              <span style={{ color: "#666", fontSize: 12 }}>分</span>
+              {errors.duration && errMsg}
+            </div>
+          ) : (
+            <>
+              <div style={styles.planItemName}>{item.name}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
+                <span style={{ ...styles.catBadge, color: CAT_COLOR_PLAN[item.category] }}>{item.category}</span>
+                <input type="number" min={0.5} step={0.5}
+                  value={localVals.duration}
+                  onChange={e => set("duration", e.target.value)}
+                  onBlur={() => commit("duration", 0.5, true)}
+                  style={{ ...styles.durationInput, ...(errors.duration ? errStyle : {}) }} />
+                {errors.duration && errMsg}
+                <span style={{ color: "#666", fontSize: 12 }}>分 ×</span>
+                <input type="number" min={1}
+                  value={localVals.sets}
+                  onChange={e => set("sets", e.target.value)}
+                  onBlur={() => commit("sets", 1, false)}
+                  style={{ ...styles.durationInput, ...(errors.sets ? errStyle : {}) }} />
+                {errors.sets && errMsg}
+                <span style={{ color: "#666", fontSize: 12 }}>セット</span>
+                {(parseInt(localVals.sets) || 1) > 1 && (
+                  <>
+                    <span style={{ color: "#555", fontSize: 12 }}>レスト</span>
+                    <input type="number" min={0}
+                      value={localVals.setRest}
+                      onChange={e => set("setRest", e.target.value)}
+                      onBlur={() => commitOptional("setRest")}
+                      style={styles.durationInput} />
+                    <span style={{ color: "#555", fontSize: 12 }}>分/間</span>
+                  </>
+                )}
+                <span style={{ color: "#f5a623", fontSize: 12 }}>バッファ</span>
+                <input type="number" min={0}
+                  value={localVals.buffer}
+                  onChange={e => set("buffer", e.target.value)}
+                  onBlur={() => commitOptional("buffer")}
+                  style={styles.durationInput} />
+                <span style={{ color: "#f5a623", fontSize: 12 }}>分</span>
+                <span style={{ color: "#4a9eff", fontSize: 12, fontWeight: 600 }}>= {Math.ceil(mins)}分</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                <span style={{ color: "#555", fontSize: 12 }}>📍</span>
+                <input type="number" min={0}
+                  value={localVals.points}
+                  onChange={e => set("points", e.target.value)}
+                  onBlur={() => commitOptional("points")}
+                  style={{ ...styles.durationInput, width: 40 }} />
+                <span style={{ color: "#555", fontSize: 12 }}>P</span>
+                <span style={{ color: "#555", fontSize: 12, marginLeft: 6 }}>🥅</span>
+                <input type="number" min={0}
+                  value={localVals.goals}
+                  onChange={e => set("goals", e.target.value)}
+                  onBlur={() => commitOptional("goals")}
+                  style={{ ...styles.durationInput, width: 40 }} />
+                <span style={{ color: "#555", fontSize: 12 }}>G</span>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      <button onClick={onRemove} style={styles.removeBtn}>✕</button>
+    </div>
+  );
+}
+
+// ============================================================
 // SHARED COMPONENTS
 // ============================================================
 function Section({ title, color, children }) {
@@ -1628,7 +1745,7 @@ const styles = {
   timeInput: { background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 8, color: "#e8e8e8", padding: "6px 10px", fontSize: 15, outline: "none", fontWeight: 600, width: 110 },
   planTimeCol: { display: "flex", flexDirection: "column", alignItems: "center", minWidth: 42 },
   planTimeLabel: { fontSize: 12, fontWeight: 700, color: "#4a9eff", letterSpacing: "0.02em" },
-  planItemRest: { background: "#0f0f14", border: "1px solid #2a2a3a", opacity: 0.8 },
+  planItemBuffer: { background: "#1a1500", border: "1px solid #f5a62333" },
   restIcon: { fontSize: 16 },
   restBtn: { padding: "8px 14px", borderRadius: 8, border: "1px solid #2a2a3a", background: "transparent", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600 },
   setsPanel: { background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 12, padding: "16px", marginBottom: 8 },
