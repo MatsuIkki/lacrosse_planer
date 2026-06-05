@@ -24,7 +24,6 @@
     const { useState, useEffect } = React;
     const XLSX = window.XLSX;
 
-
 // ============================================================
 // STORAGE HELPERS
 // ============================================================
@@ -410,15 +409,22 @@ function ScheduleTab({ roster, sessions, updateSessions, onGoToPlan, focus, upda
             🏃 この日の練習プランへ →
           </button>
 
-          {/* Position summary */}
-          <div style={styles.posSummary}>
-            {POSITIONS.map(pos => (
-              <div key={pos} style={{ ...styles.posCard, background: POS_BG[pos], border: `1px solid ${POS_COLOR[pos]}33` }}>
-                <span style={{ ...styles.posBadge, color: POS_COLOR[pos] }}>{pos}</span>
-                <span style={styles.posCount}>{presentCount(pos)}<span style={{ fontSize: 11, opacity: 0.5 }}>/{players.filter(p => p.position === pos).length}</span></span>
-              </div>
-            ))}
+          {/* Position summary + 全員参加ボタン */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={styles.posSummary}>
+              {POSITIONS.map(pos => (
+                <div key={pos} style={{ ...styles.posCard, background: POS_BG[pos], border: `1px solid ${POS_COLOR[pos]}33` }}>
+                  <span style={{ ...styles.posBadge, color: POS_COLOR[pos] }}>{pos}</span>
+                  <span style={styles.posCount}>{presentCount(pos)}<span style={{ fontSize: 11, opacity: 0.5 }}>/{players.filter(p => p.position === pos).length}</span></span>
+                </div>
+              ))}
+            </div>
           </div>
+          <button onClick={async () => {
+            const allPresent = {};
+            [...players, ...coaches].forEach(m => { allPresent[m.id] = "present"; });
+            await saveSession({ attendance: allPresent });
+          }} style={styles.allPresentBtn}>✓ 全員参加</button>
 
           {/* Coaches */}
           {coaches.length > 0 && (
@@ -529,7 +535,10 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
   };
   const totalMin = plan.reduce((s, d) => s + itemMin(d), 0);
 
-  const fmtTime = (mins) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+  const fmtTime = (mins) => {
+    const ceiled = Math.ceil(mins); // 端数は切り上げ表示
+    return `${String(Math.floor(ceiled / 60)).padStart(2, "0")}:${String(ceiled % 60).padStart(2, "0")}`;
+  };
 
   const scheduledTimes = (() => {
     if (!session.startTime) return [];
@@ -567,8 +576,6 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
     const dateLabel = `${parseInt(selectedDate.slice(5,7))}/${parseInt(selectedDate.slice(8,10))}（${dow}）`;
 
     const lines = [];
-
-    // ヘッダー
     const header = [dateLabel, locStr ? `📍${locStr}` : null].filter(Boolean).join("  ");
     lines.push(header);
     lines.push("");
@@ -578,15 +585,13 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
       const prefix = t ? `${t}  ` : "";
 
       if (item.type === "rest") {
-        lines.push(`${prefix}--- レスト ${item.duration}' ---`);
+        lines.push(`${prefix}レスト${item.duration}分`);
         return;
       }
 
       const sets = item.sets || 1;
       const setRest = item.setRest || 0;
-      const mins = itemMin(item);
 
-      // 時間表記: 1セットなら「20'」、複数なら「4'×2」
       let timeStr;
       if (sets === 1) {
         timeStr = `${item.duration}'`;
@@ -595,22 +600,20 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
         if (setRest > 0) timeStr += `（間${setRest}'）`;
       }
 
-      // サブ情報
       const sub = [];
       if (item.points > 0) sub.push(`${item.points}ポイント`);
-      if (item.goals > 0) sub.push(`🥅${item.goals}`);
-      const subStr = sub.length > 0 ? `  ※${sub.join(" ")}` : "";
+      if (item.goals > 0) sub.push(`ゴール${item.goals}つ`);
+      const subStr = sub.length > 0 ? `  ※${sub.join("、")}` : "";
 
       lines.push(`${prefix}${item.name}  ${timeStr}${subStr}`);
 
-      // 概要（あれば字下げ）
       if (item.description) {
         lines.push(`　（${item.description}）`);
       }
     });
 
     lines.push("");
-    if (endTimeStr) lines.push(`合計 ${totalMin}'  終了 ${endTimeStr}`);
+    lines.push(`合計 ${Math.ceil(totalMin)}分${endTimeStr ? `　終了 ${endTimeStr}` : ""}`);
 
     return lines.join("\n");
   };
@@ -661,7 +664,7 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
             onChange={e => saveSession({ startTime: e.target.value })} style={styles.timeInput} />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {plan.length > 0 && <span style={{ color: "#888", fontSize: 13 }}>合計 <span style={{ color: "#fff", fontWeight: 700 }}>{totalMin}分</span></span>}
+          {plan.length > 0 && <span style={{ color: "#888", fontSize: 13 }}>合計 <span style={{ color: "#fff", fontWeight: 700 }}>{Math.ceil(totalMin)}分</span></span>}
           {endTimeStr && <span style={{ color: "#4a9eff", fontSize: 13 }}>終了 <span style={{ fontWeight: 700 }}>{endTimeStr}</span></span>}
         </div>
       </div>
@@ -731,8 +734,8 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
               await saveSession({ plan: p });
             };
             const updateDuration = async (val) => {
-              if (val === "" || val === "0") return; // 空欄・0は保存しない
-              const v = Math.max(1, parseInt(val) || 1);
+              if (val === "" || val === "0") return;
+              const v = Math.max(0.5, parseFloat(val) || 0.5);
               const p = plan.map(d => d.instanceId === item.instanceId ? { ...d, duration: v } : d);
               await saveSession({ plan: p });
             };
@@ -774,7 +777,7 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
                         <div style={styles.planItemName}>{item.name}</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
                           <span style={{ ...styles.catBadge, color: CAT_COLOR_PLAN[item.category] }}>{item.category}</span>
-                          <input type="number" min={1} value={item.duration || ""}
+                          <input type="number" min={0.5} step={0.5} value={item.duration || ""}
                             onChange={e => updateDuration(e.target.value)}
                             style={styles.durationInput} />
                           <span style={{ color: "#666", fontSize: 12 }}>分 ×</span>
@@ -794,7 +797,7 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
                               <span style={{ color: "#555", fontSize: 12 }}>分/間</span>
                             </>
                           )}
-                          <span style={{ color: "#4a9eff", fontSize: 12, fontWeight: 600 }}>= {mins}分</span>
+                          <span style={{ color: "#4a9eff", fontSize: 12, fontWeight: 600 }}>= {Math.ceil(mins)}分</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
                           <span style={{ color: "#555", fontSize: 12 }}>📍</span>
@@ -857,7 +860,7 @@ function PlanTab({ roster, drills, sessions, updateSessions, initialDate }) {
                 )}
 
                 <div style={{ color: "#4a9eff", fontSize: 13, marginBottom: 20 }}>
-                  合計 = {pendingDrill.duration}分 × {pendingSets}セット{pendingSets > 1 && pendingSetRest > 0 ? ` + レスト${pendingSetRest}分 × ${pendingSets - 1}回` : ""} = <strong>{pendingDrill.duration * pendingSets + pendingSetRest * Math.max(0, pendingSets - 1)}分</strong>
+                  合計 = {pendingDrill.duration}分 × {pendingSets}セット{pendingSets > 1 && pendingSetRest > 0 ? ` + レスト${pendingSetRest}分 × ${pendingSets - 1}回` : ""} = <strong>{Math.ceil(pendingDrill.duration * pendingSets + pendingSetRest * Math.max(0, pendingSets - 1))}分</strong>
                 </div>
 
                 <div style={{ display: "flex", gap: 10 }}>
@@ -1027,8 +1030,8 @@ function DrillsTab({ drills, updateDrills }) {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div>
                 <Label>所要時間（分）</Label>
-                <input type="number" value={form.duration || ""} onChange={e => setForm({ ...form, duration: parseInt(e.target.value) || 0 })}
-                  style={styles.input} min={5} max={120} step={5} />
+                <input type="number" value={form.duration || ""} onChange={e => setForm({ ...form, duration: parseFloat(e.target.value) || 0 })}
+                  style={styles.input} min={0.5} max={120} step={0.5} />
               </div>
               <div>
                 <Label>カテゴリ</Label>
@@ -1490,7 +1493,7 @@ function ExportTab({ roster, drills, sessions, updateRoster, updateDrills, updat
                     id: genId(),
                     name: String(r[nameIdx] || ""),
                     category: r[catIdx] || "OF",
-                    duration: parseInt(r[durIdx]) || 10,
+                    duration: parseFloat(r[durIdx]) || 10,
                     description: r[descIdx] || "",
                     url: r[urlIdx] || "",
                     requirements: {
@@ -1520,11 +1523,11 @@ function ExportTab({ roster, drills, sessions, updateRoster, updateDrills, updat
                   const newPlan = dataRows.map(r => {
                     const name = String(r[nameIdx] || "");
                     if (!name) return null;
-                    if (name === "レスト") return { instanceId: genId(), type: "rest", name: "レスト", duration: parseInt(r[durIdx]) || 5 };
+                    if (name === "レスト") return { instanceId: genId(), type: "rest", name: "レスト", duration: parseFloat(r[durIdx]) || 5 };
                     return {
                       instanceId: genId(), type: "drill",
                       name, category: r[catIdx] || "OF",
-                      duration: parseInt(r[durIdx]) || 10,
+                      duration: parseFloat(r[durIdx]) || 10,
                       sets: parseInt(r[setsIdx]) || 1,
                       setRest: parseInt(r[setRestIdx]) || 0,
                     };
@@ -1677,6 +1680,8 @@ const styles = {
   eventTypeBadge: { fontSize: 13, fontWeight: 700, padding: "4px 12px", borderRadius: 20, letterSpacing: "0.04em" },
   eventNote: { color: "#888", fontSize: 13, padding: "6px 10px", background: "#111116", borderRadius: 8, marginBottom: 10, border: "1px solid #1e1e24" },
   eventTypeOption: { width: "100%", padding: "12px 16px", borderRadius: 10, cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "left", transition: "all 0.15s" },
+  allPresentBtn: { width: "100%", padding: "10px 0", borderRadius: 10, border: "1px solid #7ed32133", background: "#0f2a1a", color: "#7ed321", cursor: "pointer", fontSize: 13, fontWeight: 700, marginBottom: 16 },
+
   toPlanBtn: { width: "100%", padding: "11px 0", borderRadius: 10, border: "1px solid #2a2a3a", background: "#111116", color: "#4a9eff", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 16, textAlign: "center" },
 
   prevCopyBtn: { width: "100%", padding: "11px 0", borderRadius: 10, border: "1px dashed #2a2a3a", background: "transparent", color: "#888", cursor: "pointer", fontSize: 13, fontWeight: 600, marginBottom: 12 },
@@ -1725,7 +1730,6 @@ const styles = {
   input: { width: "100%", boxSizing: "border-box", background: "#0c0c0e", border: "1px solid #2a2a3a", borderRadius: 8, color: "#e8e8e8", padding: "10px 12px", fontSize: 14, marginBottom: 14, outline: "none" },
   label: { fontSize: 12, color: "#666", marginBottom: 6, fontWeight: 600, letterSpacing: "0.04em" },
 };
-
 
     const root = ReactDOM.createRoot(document.getElementById("root"));
     root.render(<App />);
