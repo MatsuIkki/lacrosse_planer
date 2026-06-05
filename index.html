@@ -161,7 +161,7 @@ function App() {
         {tab === "plan" && <PlanTab roster={roster} drills={drills} sessions={sessions} updateSessions={updateSessions} initialDate={planDate} />}
         {tab === "drills" && <DrillsTab drills={drills} updateDrills={updateDrills} />}
         {tab === "roster" && <RosterTab roster={roster} updateRoster={updateRoster} />}
-        {tab === "export" && <ExportTab roster={roster} drills={drills} sessions={sessions} />}
+        {tab === "export" && <ExportTab roster={roster} drills={drills} sessions={sessions} updateRoster={updateRoster} updateDrills={updateDrills} updateSessions={updateSessions} />}
       </main>
     </div>
   );
@@ -1216,11 +1216,14 @@ function RosterTab({ roster, updateRoster }) {
 // EXPORT TAB
 // ============================================================
 
-function ExportTab({ roster, drills, sessions }) {
+function ExportTab({ roster, drills, sessions, updateRoster, updateDrills, updateSessions }) {
   const [exportType, setExportType] = useState("roster");
   const [format, setFormat] = useState("xlsx");
   const [planDate, setPlanDate] = useState(today());
   const [done, setDone] = useState(false);
+  const [importMode, setImportMode] = useState("merge"); // "merge" | "overwrite"
+  const [importResult, setImportResult] = useState(null); // {ok, message}
+  const [importing, setImporting] = useState(false);
 
   const flash = () => { setDone(true); setTimeout(() => setDone(false), 2000); };
 
@@ -1392,6 +1395,163 @@ function ExportTab({ roster, drills, sessions }) {
         style={{ ...styles.addBtn, width: "100%", padding: "14px 0", fontSize: 15, marginTop: 8, ...(done ? { background: "#7ed321" } : {}) }}>
         {done ? "✓ 出力しました！" : `⬇ ${format.toUpperCase()}で出力`}
       </button>
+
+      {/* Divider */}
+      <div style={{ borderTop: "1px solid #1e1e24", margin: "28px 0 20px" }} />
+      <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>データ入力</h3>
+
+      {/* Import type */}
+      <div style={styles.section}>
+        <div style={styles.sectionTitle}>入力データ</div>
+        {EXPORT_TYPES.map(et => (
+          <button key={et.id} onClick={() => setExportType(et.id)}
+            style={{ ...styles.exportTypeBtn, ...(exportType === et.id ? styles.exportTypeBtnActive : {}) }}>
+            <span style={{ fontSize: 20 }}>{et.icon}</span>
+            <div style={{ textAlign: "left" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: exportType === et.id ? "#e8e8e8" : "#888" }}>{et.label}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {/* Merge or overwrite */}
+      <div style={styles.section}>
+        <div style={styles.sectionTitle}>取り込み方法</div>
+        <div style={{ display: "flex", gap: 10 }}>
+          {[{ id: "merge", label: "➕ 追加（既存を残す）" }, { id: "overwrite", label: "🔄 上書き（既存を削除）" }].map(m => (
+            <button key={m.id} onClick={() => setImportMode(m.id)}
+              style={{ ...styles.formatBtn, ...(importMode === m.id ? styles.formatBtnActive : {}), flex: 1, fontSize: 12, padding: "10px 6px" }}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+        {importMode === "overwrite" && (
+          <div style={{ color: "#e8533a", fontSize: 12, marginTop: 8 }}>⚠️ 既存のデータはすべて削除されます</div>
+        )}
+      </div>
+
+      {/* File input */}
+      <div style={styles.section}>
+        <div style={styles.sectionTitle}>ファイルを選択</div>
+        <label style={styles.fileLabel}>
+          <span>📂 CSV / Excel ファイルを選択</span>
+          <input type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }}
+            disabled={importing}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              setImporting(true);
+              setImportResult(null);
+              try {
+                const ab = await file.arrayBuffer();
+                const wb = XLSX.read(ab, { type: "array" });
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+
+                // ヘッダー行を探す（メタ行をスキップ）
+                let headerIdx = rows.findIndex(r => r.length > 0 && typeof r[0] === "string" && r[0] !== "");
+                // メタ行判定: 1列目が「日付」「場所」など短い場合はスキップ
+                while (headerIdx < rows.length && rows[headerIdx].length <= 2) headerIdx++;
+                const header = rows[headerIdx] || [];
+                const dataRows = rows.slice(headerIdx + 1).filter(r => r.some(c => c !== "" && c != null));
+
+                if (exportType === "roster") {
+                  // 名前,役割,ポジション,学年,キャンパス
+                  const nameIdx = header.indexOf("名前");
+                  const roleIdx = header.indexOf("役割");
+                  const posIdx = header.indexOf("ポジション");
+                  const gradeIdx = header.indexOf("学年");
+                  const campusIdx = header.indexOf("キャンパス");
+                  if (nameIdx === -1) throw new Error("「名前」列が見つかりません");
+                  const newMembers = dataRows.map(r => ({
+                    id: genId(),
+                    name: String(r[nameIdx] || ""),
+                    role: r[roleIdx] === "コーチ" ? "coach" : "player",
+                    position: r[posIdx] || "AT",
+                    grade: String(r[gradeIdx] || "").replace("年", ""),
+                    campus: r[campusIdx] || "",
+                  })).filter(m => m.name);
+                  const updated = importMode === "overwrite" ? newMembers : [...roster, ...newMembers];
+                  await updateRoster(updated);
+                  setImportResult({ ok: true, message: `${newMembers.length}名を取り込みました` });
+
+                } else if (exportType === "drills") {
+                  const nameIdx = header.indexOf("メニュー名");
+                  const catIdx = header.indexOf("カテゴリ");
+                  const durIdx = header.indexOf("時間(分)");
+                  const descIdx = header.indexOf("概要");
+                  const urlIdx = header.indexOf("参考URL");
+                  const atIdx = header.indexOf("AT必要");
+                  const mfIdx = header.indexOf("MF必要");
+                  const dfIdx = header.indexOf("DF必要");
+                  const gkIdx = header.indexOf("GK必要");
+                  if (nameIdx === -1) throw new Error("「メニュー名」列が見つかりません");
+                  const newDrills = dataRows.map(r => ({
+                    id: genId(),
+                    name: String(r[nameIdx] || ""),
+                    category: r[catIdx] || "OF",
+                    duration: parseInt(r[durIdx]) || 10,
+                    description: r[descIdx] || "",
+                    url: r[urlIdx] || "",
+                    requirements: {
+                      ...(parseInt(r[atIdx]) > 0 ? { AT: parseInt(r[atIdx]) } : {}),
+                      ...(parseInt(r[mfIdx]) > 0 ? { MF: parseInt(r[mfIdx]) } : {}),
+                      ...(parseInt(r[dfIdx]) > 0 ? { DF: parseInt(r[dfIdx]) } : {}),
+                      ...(parseInt(r[gkIdx]) > 0 ? { GK: parseInt(r[gkIdx]) } : {}),
+                    },
+                  })).filter(d => d.name);
+                  const updated = importMode === "overwrite" ? newDrills : [...drills, ...newDrills];
+                  await updateDrills(updated);
+                  setImportResult({ ok: true, message: `${newDrills.length}件のメニューを取り込みました` });
+
+                } else if (exportType === "plan") {
+                  // 開始時刻,メニュー名,カテゴリ,時間,セット数,セット間レスト,合計
+                  const timeIdx = header.indexOf("開始時刻");
+                  const nameIdx = header.indexOf("メニュー名");
+                  const catIdx = header.indexOf("カテゴリ");
+                  const durIdx = header.indexOf("時間(分/セット)");
+                  const setsIdx = header.indexOf("セット数");
+                  const setRestIdx = header.indexOf("セット間レスト(分)");
+                  if (nameIdx === -1) throw new Error("「メニュー名」列が見つかりません");
+                  // 日付はファイル名か先頭メタから取得、なければplanDate
+                  const metaRows = rows.slice(0, headerIdx);
+                  const dateMeta = metaRows.find(r => r[0] === "日付");
+                  const targetDate = dateMeta ? String(dateMeta[1]) : planDate;
+                  const newPlan = dataRows.map(r => {
+                    const name = String(r[nameIdx] || "");
+                    if (!name) return null;
+                    if (name === "レスト") return { instanceId: genId(), type: "rest", name: "レスト", duration: parseInt(r[durIdx]) || 5 };
+                    return {
+                      instanceId: genId(), type: "drill",
+                      name, category: r[catIdx] || "OF",
+                      duration: parseInt(r[durIdx]) || 10,
+                      sets: parseInt(r[setsIdx]) || 1,
+                      setRest: parseInt(r[setRestIdx]) || 0,
+                    };
+                  }).filter(Boolean);
+                  const existingSession = sessions[targetDate] || {};
+                  const newPlanData = importMode === "overwrite" ? newPlan : [...(existingSession.plan || []), ...newPlan];
+                  await updateSessions({ ...sessions, [targetDate]: { ...existingSession, plan: newPlanData } });
+                  setImportResult({ ok: true, message: `${targetDate} に${newPlan.length}件のプランを取り込みました` });
+                }
+              } catch (err) {
+                setImportResult({ ok: false, message: `エラー: ${err.message}` });
+              } finally {
+                setImporting(false);
+                e.target.value = "";
+              }
+            }} />
+        </label>
+        {importing && <div style={{ color: "#888", fontSize: 13, marginTop: 8 }}>読み込み中...</div>}
+        {importResult && (
+          <div style={{ marginTop: 10, padding: "10px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+            background: importResult.ok ? "#0f2a1a" : "#2a0f0f",
+            color: importResult.ok ? "#7ed321" : "#e8533a",
+            border: `1px solid ${importResult.ok ? "#7ed32133" : "#e8533a33"}` }}>
+            {importResult.ok ? "✓ " : "✕ "}{importResult.message}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1479,6 +1639,8 @@ const styles = {
   locationBtns: { display: "flex", gap: 6, flexWrap: "wrap" },
   locationBtn: { padding: "5px 10px", borderRadius: 6, border: "1px solid #2a2a3a", background: "transparent", color: "#666", cursor: "pointer", fontSize: 12, fontWeight: 600 },
   locationBtnActive: { background: "#1a2030", border: "1px solid #4a9eff55", color: "#4a9eff" },
+
+  fileLabel: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", padding: "14px 0", borderRadius: 10, border: "1px dashed #2a2a3a", background: "#111116", color: "#888", cursor: "pointer", fontSize: 14, fontWeight: 600 },
 
   exportTypeBtn: { width: "100%", display: "flex", alignItems: "center", gap: 14, padding: "12px 14px", borderRadius: 12, border: "1px solid #1e1e24", background: "#111116", cursor: "pointer", marginBottom: 8, transition: "all 0.15s" },
   exportTypeBtnActive: { background: "#1a1a2a", border: "1px solid #4a9eff55" },
